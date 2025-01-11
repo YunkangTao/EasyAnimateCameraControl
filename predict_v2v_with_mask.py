@@ -356,7 +356,7 @@ if __name__ == '__main__':
     prompt = data['text']
     negative_prompt = "Twisted body, limb deformities, text captions, comic, static, ugly, error, messy code, Blurring, mutation, deformation, distortion, dark and solid, comics, text subtitles, line art, quiet, solid."
 
-    save_path = "samples/easyanimate_v2v_with_mask"
+    save_path = "output_dir_20241230_inpainting_with_mask_10000_realestate/sample"
 
     main(
         transformer_path,

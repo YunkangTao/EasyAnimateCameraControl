@@ -1,4 +1,4 @@
-export MODEL_NAME="models/Diffusion_Transformer/EasyAnimateV5-7b-zh-InP"
+export MODEL_NAME="models/Diffusion_Transformer/EasyAnimateV5-12b-zh-InP"
 export DATASET_NAME="/mnt/chenyang_lei/Datasets/easyanimate_dataset/z_datasets_warped_videos_2_3"
 export DATASET_META_NAME="/mnt/chenyang_lei/Datasets/easyanimate_dataset/z_datasets_warped_videos_2_3/metadata.json"
 export NCCL_IB_DISABLE=1
@@ -13,7 +13,7 @@ accelerate launch \
   --deepspeed_config_file config/zero_stage2_config.json \
   --deepspeed_multinode_launcher standard \
   --main_process_port 29501 \
-  scripts/train_inpainting_with_mask.py \
+  scripts/train_lora.py \
   --pretrained_model_name_or_path=$MODEL_NAME \
   --train_data_dir=$DATASET_NAME \
   --train_data_meta=$DATASET_META_NAME \
@@ -24,13 +24,12 @@ accelerate launch \
   --train_batch_size=1 \
   --gradient_accumulation_steps=2 \
   --dataloader_num_workers=8 \
-  --num_train_epochs=3 \
+  --num_train_epochs=100 \
   --checkpointing_steps=6778 \
-  --learning_rate=2e-05 \
-  --lr_scheduler="constant_with_warmup" \
-  --lr_warmup_steps=100 \
+  --learning_rate=1e-04 \
   --seed=42 \
-  --output_dir="output_dir_20250107_inpainting_with_mask_all_realestate" \
+  --low_vram \
+  --output_dir="output_dir_20250111_inpainting_with_mask_all_realestate_lora" \
   --gradient_checkpointing \
   --mixed_precision="bf16" \
   --adam_weight_decay=5e-3 \
@@ -40,6 +39,4 @@ accelerate launch \
   --not_sigma_loss \
   --uniform_sampling \
   --use_deepspeed \
-  --train_mode="inpaint" \
-  --trainable_modules "." \
-  --resume_from_checkpoint="latest"
+  --train_mode="inpaint"
