@@ -13,7 +13,7 @@ accelerate launch \
   --deepspeed_config_file config/zero_stage2_config.json \
   --deepspeed_multinode_launcher standard \
   --main_process_port 29501 \
-  scripts/train_lora.py \
+  scripts/train_lora_with_mask.py \
   --pretrained_model_name_or_path=$MODEL_NAME \
   --train_data_dir=$DATASET_NAME \
   --train_data_meta=$DATASET_META_NAME \
@@ -21,14 +21,13 @@ accelerate launch \
   --video_sample_size=512 \
   --video_sample_stride=1 \
   --video_sample_n_frames=49 \
-  --train_batch_size=1 \
-  --gradient_accumulation_steps=2 \
+  --train_batch_size=2 \
+  --gradient_accumulation_steps=1 \
   --dataloader_num_workers=8 \
   --num_train_epochs=100 \
   --checkpointing_steps=6778 \
   --learning_rate=1e-04 \
   --seed=42 \
-  --low_vram \
   --output_dir="output_dir_20250111_inpainting_with_mask_all_realestate_lora" \
   --gradient_checkpointing \
   --mixed_precision="bf16" \

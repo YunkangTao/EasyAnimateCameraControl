@@ -1692,26 +1692,26 @@ def main():
                     if noise_pred.size()[1] != vae.config.latent_channels:
                         noise_pred, _ = noise_pred.chunk(2, dim=1)
 
-                    # def custom_mse_loss(noise_pred, target, threshold=50):
-                    #     noise_pred = noise_pred.float()
-                    #     target = target.float()
-                    #     diff = noise_pred - target
-                    #     mse_loss = F.mse_loss(noise_pred, target, reduction='none')
-                    #     mask = (diff.abs() <= threshold).float()
-                    #     masked_loss = mse_loss * mask
-                    #     final_loss = masked_loss.mean()
-                    #     return final_loss
+                    def custom_mse_loss(noise_pred, target, threshold=50):
+                        noise_pred = noise_pred.float()
+                        target = target.float()
+                        diff = noise_pred - target
+                        mse_loss = F.mse_loss(noise_pred, target, reduction='none')
+                        mask = (diff.abs() <= threshold).float()
+                        masked_loss = mse_loss * mask
+                        final_loss = masked_loss.mean()
+                        return final_loss
 
-                    # loss = custom_mse_loss(noise_pred.float(), target.float())
+                    loss = custom_mse_loss(noise_pred.float(), target.float())
 
-                    def my_mse_loss(output_latents, target):
-                        mse_loss = F.mse_loss(output_latents.float(), target.float(), reduction='mean')
-                        if mse_loss >= 1.0:
-                            return 0.0
-                        else:
-                            return mse_loss
+                    # def my_mse_loss(output_latents, target):
+                    #     mse_loss = F.mse_loss(output_latents.float(), target.float(), reduction='mean')
+                    #     if mse_loss >= 1.0:
+                    #         return 0.0
+                    #     else:
+                    #         return mse_loss
 
-                    output_latents = noise_scheduler.step(noise_pred, timesteps, noisy_latents).pred_original_sample
+                    # output_latents = noise_scheduler.step(noise_pred, timesteps, noisy_latents).pred_original_sample
                     # output_latents = []
                     # batch_size = noise_pred.size(0)
 
@@ -1730,17 +1730,17 @@ def main():
                     # # 将结果堆叠回批次形式
                     # output_latents = torch.cat(output_latents, dim=0)  # 形状: [2, 16, 7, 32, 32]
 
-                    loss = my_mse_loss(output_latents, gt_latents)
+                    # loss = my_mse_loss(output_latents, gt_latents)
 
-                    if accelerator.is_main_process:
-                        if global_step % (len(train_dataloader) - 1) == 0 or global_step == 0:
-                            with torch.no_grad():
-                                video_predict_output = decode_latents(output_latents.to(weight_dtype), vae)
-                                video_predict_output = torch.from_numpy(video_predict_output)
-                                video_target = decode_latents(gt_latents, vae)
-                                video_target = torch.from_numpy(video_target)
-                                save_videos_grid(video_predict_output, os.path.join(args.output_dir, f"sample/sample-{global_step}-video_predict_output.gif"))
-                                save_videos_grid(video_target, os.path.join(args.output_dir, f"sample/sample-{global_step}-video_target.gif"))
+                    # if accelerator.is_main_process:
+                    #     if global_step % (len(train_dataloader) - 1) == 0 or global_step == 0:
+                    #         with torch.no_grad():
+                    #             video_predict_output = decode_latents(output_latents.to(weight_dtype), vae)
+                    #             video_predict_output = torch.from_numpy(video_predict_output)
+                    #             video_target = decode_latents(gt_latents, vae)
+                    #             video_target = torch.from_numpy(video_target)
+                    #             save_videos_grid(video_predict_output, os.path.join(args.output_dir, f"sample/sample-{global_step}-video_predict_output.gif"))
+                    #             save_videos_grid(video_target, os.path.join(args.output_dir, f"sample/sample-{global_step}-video_target.gif"))
 
                     if args.motion_sub_loss and noise_pred.size()[2] > 2:
                         gt_sub_noise = noise_pred[:, :, 1:].float() - noise_pred[:, :, :-1].float()

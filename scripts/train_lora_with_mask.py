@@ -15,6 +15,13 @@
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
+# import debugpy
+
+# # 允许其他机器连接
+# debugpy.listen(("0.0.0.0", 5678))
+# print("等待调试器连接...")
+# debugpy.wait_for_client()  # 阻塞，直到调试器连接
+# print("调试器已连接")
 
 import argparse
 import copy
@@ -48,11 +55,19 @@ from huggingface_hub import create_repo, upload_folder
 from omegaconf import OmegaConf
 from packaging import version
 from PIL import Image
-from torch.utils.data import RandomSampler
+
+# from torch.utils.data import RandomSampler
 from torch.utils.tensorboard import SummaryWriter
 from torchvision import transforms
 from tqdm.auto import tqdm
-from transformers import BertModel, BertTokenizer, CLIPImageProcessor, CLIPVisionModelWithProjection, T5EncoderModel, T5Tokenizer
+from transformers import (
+    BertModel,
+    BertTokenizer,
+    CLIPImageProcessor,
+    CLIPVisionModelWithProjection,
+    T5EncoderModel,
+    T5Tokenizer,
+)
 from transformers.utils import ContextManagers
 
 import datasets
@@ -62,26 +77,34 @@ project_roots = [os.path.dirname(current_file_path), os.path.dirname(os.path.dir
 for project_root in project_roots:
     sys.path.insert(0, project_root) if project_root not in sys.path else None
 
-from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection, T5EncoderModel, T5Tokenizer
-from transformers.utils import ContextManagers
+# from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection, T5EncoderModel, T5Tokenizer
+# from transformers.utils import ContextManagers
 
-from easyanimate.data.bucket_sampler import (
-    ASPECT_RATIO_512,
-    ASPECT_RATIO_RANDOM_CROP_512,
-    ASPECT_RATIO_RANDOM_CROP_PROB,
-    AspectRatioBatchImageSampler,
-    AspectRatioBatchImageVideoSampler,
-    AspectRatioBatchSampler,
-    RandomSampler,
-    get_closest_ratio,
+from easyanimate.data.bucket_sampler import RandomSampler
+
+# from easyanimate.data.bucket_sampler import (
+#     ASPECT_RATIO_512,
+#     ASPECT_RATIO_RANDOM_CROP_512,
+#     ASPECT_RATIO_RANDOM_CROP_PROB,
+#     AspectRatioBatchImageSampler,
+#     AspectRatioBatchImageVideoSampler,
+#     AspectRatioBatchSampler,
+#     RandomSampler,
+#     get_closest_ratio,
+# )
+# from easyanimate.data.dataset_image import CC15M
+# from easyanimate.data.dataset_image_video import ImageVideoDataset, ImageVideoSampler, get_random_mask
+# from easyanimate.data.dataset_video import VideoDataset, WebVid10M
+from easyanimate.data.dataset_inpainting_with_mask import (
+    VideoSamplerWithMask,
+    VideoDatasetWithMask,
 )
-from easyanimate.data.dataset_image import CC15M
-from easyanimate.data.dataset_image_video import ImageVideoDataset, ImageVideoSampler, get_random_mask
-from easyanimate.data.dataset_video import VideoDataset, WebVid10M
+
 from easyanimate.models import name_to_autoencoder_magvit, name_to_transformer3d
-from easyanimate.models.autoencoder_magvit import AutoencoderKLMagvit
-from easyanimate.models.transformer2d import Transformer2DModel
-from easyanimate.models.transformer3d import HunyuanTransformer3DModel, Transformer3DModel
+
+# from easyanimate.models.autoencoder_magvit import AutoencoderKLMagvit
+# from easyanimate.models.transformer2d import Transformer2DModel
+# from easyanimate.models.transformer3d import HunyuanTransformer3DModel, Transformer3DModel
 from easyanimate.pipeline.pipeline_easyanimate import EasyAnimatePipeline
 from easyanimate.pipeline.pipeline_easyanimate_inpaint import EasyAnimateInpaintPipeline
 from easyanimate.pipeline.pipeline_easyanimate_multi_text_encoder import (
@@ -90,8 +113,13 @@ from easyanimate.pipeline.pipeline_easyanimate_multi_text_encoder import (
     get_3d_rotary_pos_embed,
     get_resize_crop_region_for_grid,
 )
-from easyanimate.pipeline.pipeline_easyanimate_multi_text_encoder_inpaint import EasyAnimatePipeline_Multi_Text_Encoder_Inpaint, add_noise_to_reference_video, resize_mask
-from easyanimate.pipeline.pipeline_pixart_magvit import PixArtAlphaMagvitPipeline
+from easyanimate.pipeline.pipeline_easyanimate_multi_text_encoder_inpaint import (
+    EasyAnimatePipeline_Multi_Text_Encoder_Inpaint,
+    add_noise_to_reference_video,
+    resize_mask,
+)
+
+# from easyanimate.pipeline.pipeline_pixart_magvit import PixArtAlphaMagvitPipeline
 from easyanimate.utils import gaussian_diffusion as gd
 from easyanimate.utils.discrete_sampler import DiscreteSampling
 from easyanimate.utils.lora_utils import create_network, merge_lora, unmerge_lora
@@ -106,13 +134,13 @@ rotary_pos_embed_cache = {}
 
 def _get_2d_rotary_pos_embed_cached(embed_dim, crops_coords, grid_size):
     tmp_key = (embed_dim, crops_coords, grid_size)
-    print(
-        'embed_dim=%d crops_coords=%s grid_size=%s in_cache=%d cache_size=%d' % (embed_dim, crops_coords, grid_size, tmp_key in rotary_pos_embed_cache, len(rotary_pos_embed_cache))
-    )
+    # print(
+    #     'embed_dim=%d crops_coords=%s grid_size=%s in_cache=%d cache_size=%d' % (embed_dim, crops_coords, grid_size, tmp_key in rotary_pos_embed_cache, len(rotary_pos_embed_cache))
+    # )
     if tmp_key not in rotary_pos_embed_cache:
         tmp_embed = get_2d_rotary_pos_embed(embed_dim, crops_coords, grid_size)
         tmp_embed_gpu = (tmp_embed[0].cuda(), tmp_embed[1].cuda())
-        print('\tembed_dim=%d data_size=%s' % (embed_dim, tmp_embed[0].shape))
+        # print('\tembed_dim=%d data_size=%s' % (embed_dim, tmp_embed[0].shape))
         rotary_pos_embed_cache[tmp_key] = tmp_embed_gpu
         return tmp_embed_gpu
     else:
@@ -121,9 +149,9 @@ def _get_2d_rotary_pos_embed_cached(embed_dim, crops_coords, grid_size):
 
 def _get_3d_rotary_pos_embed_cached(embed_dim, crops_coords, grid_size, temporal_size):
     tmp_key = (embed_dim, crops_coords, grid_size, temporal_size)
-    print(
-        'embed_dim=%d crops_coords=%s grid_size=%s in_cache=%d cache_size=%d' % (embed_dim, crops_coords, grid_size, tmp_key in rotary_pos_embed_cache, len(rotary_pos_embed_cache))
-    )
+    # print(
+    #     'embed_dim=%d crops_coords=%s grid_size=%s in_cache=%d cache_size=%d' % (embed_dim, crops_coords, grid_size, tmp_key in rotary_pos_embed_cache, len(rotary_pos_embed_cache))
+    # )
     if tmp_key not in rotary_pos_embed_cache:
         tmp_embed = get_3d_rotary_pos_embed(
             embed_dim,
@@ -133,7 +161,7 @@ def _get_3d_rotary_pos_embed_cached(embed_dim, crops_coords, grid_size, temporal
             use_real=True,
         )
         tmp_embed_gpu = (tmp_embed[0].cuda(), tmp_embed[1].cuda())
-        print('\tembed_dim=%d data_size=%s' % (embed_dim, tmp_embed[0].shape))
+        # print('\tembed_dim=%d data_size=%s' % (embed_dim, tmp_embed[0].shape))
         rotary_pos_embed_cache[tmp_key] = tmp_embed_gpu
         return tmp_embed_gpu
     else:
@@ -769,6 +797,46 @@ def parse_args():
     return args
 
 
+def smooth_output(vae, video, mini_batch_encoder):
+    if video.size()[2] <= mini_batch_encoder:
+        return video
+    prefix_index_before = mini_batch_encoder // 2
+    prefix_index_after = mini_batch_encoder - prefix_index_before
+    pixel_values = video[:, :, prefix_index_before:-prefix_index_after]
+
+    # Encode middle videos
+    latents = vae.encode(pixel_values)[0]
+    latents = latents.mode()
+    # Decode middle videos
+    middle_video = vae.decode(latents)[0]
+
+    video[:, :, prefix_index_before:-prefix_index_after] = (video[:, :, prefix_index_before:-prefix_index_after] + middle_video) / 2
+    return video
+
+
+def decode_latents(latents, vae):
+    video_length = latents.shape[2]
+    latents = 1 / vae.config.scaling_factor * latents
+    if vae.quant_conv is None or vae.quant_conv.weight.ndim == 5:
+        mini_batch_encoder = vae.mini_batch_encoder
+        mini_batch_decoder = vae.mini_batch_decoder
+        video = vae.decode(latents)[0]
+        video = video.clamp(-1, 1)
+        if not vae.cache_compression_vae and not vae.cache_mag_vae:
+            video = smooth_output(vae, video, mini_batch_encoder).cpu().clamp(-1, 1)
+    else:
+        latents = rearrange(latents, "b c f h w -> (b f) c h w")
+        video = []
+        for frame_idx in tqdm(range(latents.shape[0])):
+            video.append(vae.decode(latents[frame_idx : frame_idx + 1]).sample)
+        video = torch.cat(video)
+        video = rearrange(video, "(b f) c h w -> b c f h w", f=video_length)
+    video = (video / 2 + 0.5).clamp(0, 1)
+    # we always cast to float32 as this does not cause significant overhead and is compatible with bfloa16
+    video = video.cpu().float().numpy()
+    return video
+
+
 def main():
     args = parse_args()
 
@@ -1052,268 +1120,30 @@ def main():
     sample_n_frames_bucket_interval = vae.mini_batch_encoder if vae.quant_conv is None or vae.quant_conv.weight.ndim == 5 else 4
 
     # Get the dataset
-    train_dataset = ImageVideoDataset(
+    train_dataset = VideoDatasetWithMask(
         args.train_data_meta,
         args.train_data_dir,
         video_sample_size=args.video_sample_size,
         video_sample_stride=args.video_sample_stride,
         video_sample_n_frames=args.video_sample_n_frames,
-        video_repeat=args.video_repeat,
-        image_sample_size=args.image_sample_size,
         enable_bucket=args.enable_bucket,
         enable_inpaint=True if args.train_mode != "normal" else False,
     )
 
-    if args.enable_bucket:
-        aspect_ratio_sample_size = {key: [x / 512 * args.video_sample_size for x in ASPECT_RATIO_512[key]] for key in ASPECT_RATIO_512.keys()}
-        batch_sampler_generator = torch.Generator().manual_seed(args.seed)
-        batch_sampler = AspectRatioBatchImageVideoSampler(
-            sampler=RandomSampler(train_dataset, generator=batch_sampler_generator),
-            dataset=train_dataset.dataset,
-            batch_size=args.train_batch_size,
-            train_folder=args.train_data_dir,
-            drop_last=True,
-            aspect_ratios=aspect_ratio_sample_size,
-        )
-
-        # Get the frame length at different resolutions according to token_length
-        def get_length_to_frame_num(token_length):
-            if args.image_sample_size > args.video_sample_size:
-                sample_sizes = list(range(args.video_sample_size, args.image_sample_size + 1, 128))
-
-                if sample_sizes[-1] != args.image_sample_size:
-                    sample_sizes.append(args.image_sample_size)
-            else:
-                sample_sizes = [args.image_sample_size]
-
-            if vae.cache_mag_vae:
-                length_to_frame_num = {
-                    sample_size: min(token_length / sample_size / sample_size, args.video_sample_n_frames) // sample_n_frames_bucket_interval * sample_n_frames_bucket_interval + 1
-                    for sample_size in sample_sizes
-                }
-            else:
-                length_to_frame_num = {
-                    sample_size: min(token_length / sample_size / sample_size, args.video_sample_n_frames) // sample_n_frames_bucket_interval * sample_n_frames_bucket_interval
-                    for sample_size in sample_sizes
-                }
-
-            return length_to_frame_num
-
-        def collate_fn(examples):
-            # Get token length
-            target_token_length = args.video_sample_n_frames * args.token_sample_size * args.token_sample_size
-            length_to_frame_num = get_length_to_frame_num(target_token_length)
-
-            # Create new output
-            new_examples = {}
-            new_examples["target_token_length"] = target_token_length
-            new_examples["pixel_values"] = []
-            new_examples["text"] = []
-            # Used in Inpaint mode
-            if args.train_mode != "normal":
-                new_examples["mask_pixel_values"] = []
-                new_examples["mask"] = []
-                new_examples["clip_pixel_values"] = []
-
-            # Get downsample ratio in image and videos
-            pixel_value = examples[0]["pixel_values"]
-            data_type = examples[0]["data_type"]
-            f, h, w, c = np.shape(pixel_value)
-            if data_type == 'image':
-                random_downsample_ratio = (
-                    1 if not args.random_hw_adapt else get_random_downsample_ratio(args.image_sample_size, image_ratio=[args.image_sample_size / args.video_sample_size], rng=rng)
-                )
-
-                aspect_ratio_sample_size = {key: [x / 512 * args.image_sample_size / random_downsample_ratio for x in ASPECT_RATIO_512[key]] for key in ASPECT_RATIO_512.keys()}
-                aspect_ratio_random_crop_sample_size = {
-                    key: [x / 512 * args.image_sample_size / random_downsample_ratio for x in ASPECT_RATIO_RANDOM_CROP_512[key]] for key in ASPECT_RATIO_RANDOM_CROP_512.keys()
-                }
-
-                batch_video_length = args.video_sample_n_frames + sample_n_frames_bucket_interval
-            else:
-                if args.random_hw_adapt:
-                    if args.training_with_video_token_length:
-                        local_min_size = np.min(np.array([np.mean(np.array([np.shape(example["pixel_values"])[1], np.shape(example["pixel_values"])[2]])) for example in examples]))
-                        # The video will be resized to a lower resolution than its own.
-                        choice_list = [length for length in list(length_to_frame_num.keys()) if length < local_min_size * 1.25]
-                        if len(choice_list) == 0:
-                            choice_list = list(length_to_frame_num.keys())
-                        if rng is None:
-                            local_video_sample_size = np.random.choice(choice_list)
-                        else:
-                            local_video_sample_size = rng.choice(choice_list)
-                        batch_video_length = length_to_frame_num[local_video_sample_size]
-                        random_downsample_ratio = args.video_sample_size / local_video_sample_size
-                    else:
-                        random_downsample_ratio = get_random_downsample_ratio(args.video_sample_size, rng=rng)
-                        batch_video_length = args.video_sample_n_frames + sample_n_frames_bucket_interval
-                else:
-                    random_downsample_ratio = 1
-                    batch_video_length = args.video_sample_n_frames + sample_n_frames_bucket_interval
-
-                aspect_ratio_sample_size = {key: [x / 512 * args.video_sample_size / random_downsample_ratio for x in ASPECT_RATIO_512[key]] for key in ASPECT_RATIO_512.keys()}
-                aspect_ratio_random_crop_sample_size = {
-                    key: [x / 512 * args.video_sample_size / random_downsample_ratio for x in ASPECT_RATIO_RANDOM_CROP_512[key]] for key in ASPECT_RATIO_RANDOM_CROP_512.keys()
-                }
-
-            closest_size, closest_ratio = get_closest_ratio(h, w, ratios=aspect_ratio_sample_size)
-            closest_size = [int(x / 16) * 16 for x in closest_size]
-            if args.random_ratio_crop:
-                if rng is None:
-                    random_sample_size = aspect_ratio_random_crop_sample_size[np.random.choice(list(aspect_ratio_random_crop_sample_size.keys()), p=ASPECT_RATIO_RANDOM_CROP_PROB)]
-                else:
-                    random_sample_size = aspect_ratio_random_crop_sample_size[rng.choice(list(aspect_ratio_random_crop_sample_size.keys()), p=ASPECT_RATIO_RANDOM_CROP_PROB)]
-                random_sample_size = [int(x / 16) * 16 for x in random_sample_size]
-
-            for example in examples:
-                if args.random_ratio_crop:
-                    # To 0~1
-                    pixel_values = torch.from_numpy(example["pixel_values"]).permute(0, 3, 1, 2).contiguous()
-                    pixel_values = pixel_values / 255.0
-
-                    # Get adapt hw for resize
-                    b, c, h, w = pixel_values.size()
-                    th, tw = random_sample_size
-                    if th / tw > h / w:
-                        nh = int(th)
-                        nw = int(w / h * nh)
-                    else:
-                        nw = int(tw)
-                        nh = int(h / w * nw)
-
-                    transform = transforms.Compose(
-                        [
-                            transforms.Resize([nh, nw]),
-                            transforms.CenterCrop([int(x) for x in random_sample_size]),
-                            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True),
-                        ]
-                    )
-                else:
-                    # To 0~1
-                    pixel_values = torch.from_numpy(example["pixel_values"]).permute(0, 3, 1, 2).contiguous()
-                    pixel_values = pixel_values / 255.0
-
-                    # Get adapt hw for resize
-                    closest_size = list(map(lambda x: int(x), closest_size))
-                    if closest_size[0] / h > closest_size[1] / w:
-                        resize_size = closest_size[0], int(w * closest_size[0] / h)
-                    else:
-                        resize_size = int(h * closest_size[1] / w), closest_size[1]
-
-                    transform = transforms.Compose(
-                        [
-                            transforms.Resize(resize_size, interpolation=transforms.InterpolationMode.BILINEAR),  # Image.BICUBIC
-                            transforms.CenterCrop(closest_size),
-                            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True),
-                        ]
-                    )
-                new_examples["pixel_values"].append(transform(pixel_values))
-                new_examples["text"].append(example["text"])
-
-                # Magvae needs the number of frames to be 4n + 1.
-                if vae.cache_mag_vae:
-                    batch_video_length = int(
-                        min(
-                            batch_video_length,
-                            (len(pixel_values) - 1) // sample_n_frames_bucket_interval * sample_n_frames_bucket_interval + 1,
-                        )
-                    )
-                else:
-                    batch_video_length = int(
-                        min(
-                            batch_video_length,
-                            len(pixel_values) // sample_n_frames_bucket_interval * sample_n_frames_bucket_interval,
-                        )
-                    )
-                if batch_video_length == 0:
-                    batch_video_length = 1
-
-                # Used in Inpaint mode
-                if args.train_mode != "normal":
-                    mask = get_random_mask(new_examples["pixel_values"][-1].size())
-                    mask_pixel_values = new_examples["pixel_values"][-1] * (1 - mask) + torch.ones_like(new_examples["pixel_values"][-1]) * -1 * mask
-                    new_examples["mask_pixel_values"].append(mask_pixel_values)
-                    new_examples["mask"].append(mask)
-
-                    def get_random_clip_index(low, high):
-                        if high - low <= 1.1:
-                            return low
-                        values = np.arange(low, high)
-                        probabilities = np.ones(len(values)) * 0.5 / (len(values) - 1)
-                        probabilities[0] = 0.5
-                        return np.random.choice(values, p=probabilities)
-
-                    clip_index = get_random_clip_index(0, len(new_examples["pixel_values"][-1]))
-                    clip_pixel_values = new_examples["pixel_values"][-1][clip_index].permute(1, 2, 0).contiguous()
-                    clip_pixel_values = (clip_pixel_values * 0.5 + 0.5) * 255
-                    new_examples["clip_pixel_values"].append(clip_pixel_values)
-
-            # Limit the number of frames to the same
-            new_examples["pixel_values"] = torch.stack([example[:batch_video_length] for example in new_examples["pixel_values"]])
-            if args.train_mode != "normal":
-                new_examples["mask_pixel_values"] = torch.stack([example[:batch_video_length] for example in new_examples["mask_pixel_values"]])
-                new_examples["mask"] = torch.stack([example[:batch_video_length] for example in new_examples["mask"]])
-                new_examples["clip_pixel_values"] = torch.stack([example for example in new_examples["clip_pixel_values"]])
-
-            # Encode prompts when enable_text_encoder_in_dataloader=True
-            if args.enable_text_encoder_in_dataloader:
-                if config['text_encoder_kwargs'].get('enable_multi_text_encoder', False):
-                    prompt_embeds, prompt_attention_mask = encode_prompt(
-                        tokenizer,
-                        text_encoder,
-                        new_examples['text'],
-                        None,
-                        tokenizer_max_length=args.tokenizer_max_length,
-                        dtype=weight_dtype,
-                        enable_text_attention_mask=transformer3d.config.get("enable_text_attention_mask", True),
-                    )
-                    prompt_embeds_2, prompt_attention_mask_2 = encode_prompt(
-                        tokenizer_2,
-                        text_encoder_2,
-                        new_examples['text'],
-                        None,
-                        tokenizer_max_length=args.tokenizer_max_length,
-                        dtype=weight_dtype,
-                        enable_text_attention_mask=transformer3d.config.get("enable_text_attention_mask", True),
-                    )
-                    new_examples['prompt_embeds'] = prompt_embeds
-                    new_examples['prompt_attention_mask'] = prompt_attention_mask
-                    new_examples['prompt_embeds_2'] = prompt_embeds_2
-                    new_examples['prompt_attention_mask_2'] = prompt_attention_mask_2
-                else:
-                    prompt_embeds, prompt_attention_mask = encode_prompt(
-                        tokenizer,
-                        text_encoder,
-                        new_examples['text'],
-                        None,
-                        tokenizer_max_length=args.tokenizer_max_length,
-                        dtype=weight_dtype,
-                        add_special_tokens=True,
-                        enable_text_attention_mask=transformer3d.config.get("enable_text_attention_mask", True),
-                    )
-                    new_examples['prompt_embeds'] = prompt_embeds
-                    new_examples['prompt_attention_mask'] = prompt_attention_mask
-
-            return new_examples
-
-        # DataLoaders creation:
-        train_dataloader = torch.utils.data.DataLoader(
-            train_dataset,
-            batch_sampler=batch_sampler,
-            collate_fn=collate_fn,
-            persistent_workers=True if args.dataloader_num_workers != 0 else False,
-            num_workers=args.dataloader_num_workers,
-        )
-    else:
-        # DataLoaders creation:
-        batch_sampler_generator = torch.Generator().manual_seed(args.seed)
-        batch_sampler = ImageVideoSampler(RandomSampler(train_dataset, generator=batch_sampler_generator), train_dataset, args.train_batch_size)
-        train_dataloader = torch.utils.data.DataLoader(
-            train_dataset,
-            batch_sampler=batch_sampler,
-            persistent_workers=True if args.dataloader_num_workers != 0 else False,
-            num_workers=args.dataloader_num_workers,
-        )
+    # DataLoaders creation:
+    batch_sampler_generator = torch.Generator().manual_seed(args.seed)
+    batch_sampler = VideoSamplerWithMask(
+        RandomSampler(train_dataset, generator=batch_sampler_generator),
+        train_dataset,
+        args.train_batch_size,
+        drop_last=True,
+    )
+    train_dataloader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_sampler=batch_sampler,
+        persistent_workers=True if args.dataloader_num_workers != 0 else False,
+        num_workers=args.dataloader_num_workers,
+    )
 
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
@@ -1442,24 +1272,24 @@ def main():
         train_loss = 0.0
         batch_sampler.sampler.generator = torch.Generator().manual_seed(args.seed + epoch)
         for step, batch in enumerate(train_dataloader):
-            # Data batch sanity check
-            if epoch == first_epoch and step == 0:
-                pixel_values, texts = batch['pixel_values'].cpu(), batch['text']
-                pixel_values = rearrange(pixel_values, "b f c h w -> b c f h w")
-                if pixel_values.ndim == 4:
-                    pixel_values = pixel_values.unsqueeze(2)
-                os.makedirs(os.path.join(args.output_dir, "sanity_check"), exist_ok=True)
-                for idx, (pixel_value, text) in enumerate(zip(pixel_values, texts)):
-                    pixel_value = pixel_value[None, ...]
-                    gif_name = '-'.join(text.replace('/', '').split()[:10]) if not text == '' else f'{global_step}-{idx}'
-                    save_videos_grid(pixel_value, f"{args.output_dir}/sanity_check/{gif_name[:10]}.gif", rescale=True)
-                if args.train_mode != "normal":
-                    clip_pixel_values, mask_pixel_values, texts = batch['clip_pixel_values'].cpu(), batch['mask_pixel_values'].cpu(), batch['text']
-                    mask_pixel_values = rearrange(mask_pixel_values, "b f c h w -> b c f h w")
-                    for idx, (clip_pixel_value, pixel_value, text) in enumerate(zip(clip_pixel_values, mask_pixel_values, texts)):
-                        pixel_value = pixel_value[None, ...]
-                        Image.fromarray(np.uint8(clip_pixel_value)).save(f"{args.output_dir}/sanity_check/clip_{gif_name[:10] if not text == '' else f'{global_step}-{idx}'}.png")
-                        save_videos_grid(pixel_value, f"{args.output_dir}/sanity_check/mask_{gif_name[:10] if not text == '' else f'{global_step}-{idx}'}.gif", rescale=True)
+            # # Data batch sanity check
+            # if epoch == first_epoch and step == 0:
+            #     pixel_values, texts = batch['pixel_values'].cpu(), batch['text']
+            #     pixel_values = rearrange(pixel_values, "b f c h w -> b c f h w")
+            #     if pixel_values.ndim == 4:
+            #         pixel_values = pixel_values.unsqueeze(2)
+            #     os.makedirs(os.path.join(args.output_dir, "sanity_check"), exist_ok=True)
+            #     for idx, (pixel_value, text) in enumerate(zip(pixel_values, texts)):
+            #         pixel_value = pixel_value[None, ...]
+            #         gif_name = '-'.join(text.replace('/', '').split()[:10]) if not text == '' else f'{global_step}-{idx}'
+            #         save_videos_grid(pixel_value, f"{args.output_dir}/sanity_check/{gif_name[:10]}.gif", rescale=True)
+            #     if args.train_mode != "normal":
+            #         clip_pixel_values, mask_pixel_values, texts = batch['clip_pixel_values'].cpu(), batch['mask_pixel_values'].cpu(), batch['text']
+            #         mask_pixel_values = rearrange(mask_pixel_values, "b f c h w -> b c f h w")
+            #         for idx, (clip_pixel_value, pixel_value, text) in enumerate(zip(clip_pixel_values, mask_pixel_values, texts)):
+            #             pixel_value = pixel_value[None, ...]
+            #             Image.fromarray(np.uint8(clip_pixel_value)).save(f"{args.output_dir}/sanity_check/clip_{gif_name[:10] if not text == '' else f'{global_step}-{idx}'}.png")
+            #             save_videos_grid(pixel_value, f"{args.output_dir}/sanity_check/mask_{gif_name[:10] if not text == '' else f'{global_step}-{idx}'}.gif", rescale=True)
 
             with accelerator.accumulate(transformer3d):
                 # Convert images to latent space
@@ -1635,9 +1465,14 @@ def main():
                         vae_stream_1.wait_stream(torch.cuda.current_stream())
                         with torch.cuda.stream(vae_stream_1):
                             latents = _batch_encode_vae(pixel_values)
+                            # gt_latents = _batch_encode_vae(ground_truth)
+                            gt_latents = latents.detach().clone()
                     else:
                         latents = _batch_encode_vae(pixel_values)
+                        # gt_latents = _batch_encode_vae(ground_truth)
+                        gt_latents = latents.detach().clone()
                     latents = latents * vae.config.scaling_factor
+                    gt_latents = gt_latents * vae.config.scaling_factor
 
                     if args.train_mode != "normal":
                         # Encode masks.
@@ -1860,6 +1695,44 @@ def main():
                         return final_loss
 
                     loss = custom_mse_loss(noise_pred.float(), target.float())
+
+                    # def my_mse_loss(output_latents, target):
+                    #     mse_loss = F.mse_loss(output_latents.float(), target.float(), reduction='mean')
+                    #     if mse_loss >= 1.0:
+                    #         return 0.0
+                    #     else:
+                    #         return mse_loss
+
+                    # output_latents = noise_scheduler.step(noise_pred, timesteps, noisy_latents).pred_original_sample
+                    # output_latents = []
+                    # batch_size = noise_pred.size(0)
+
+                    # for i in range(batch_size):
+                    #     # 提取单个样本的 noise_pred, timesteps, 和 noisy_latents
+                    #     single_noise_pred = noise_pred[i].unsqueeze(0)  # 形状: [1, 16, 7, 32, 32]
+                    #     single_timestep = timesteps[i].unsqueeze(0)  # 形状: [1]
+                    #     single_noisy_latents = noisy_latents[i].unsqueeze(0)  # 形状: [1, 16, 7, 32, 32]
+
+                    #     # 调用 step 方法
+                    #     step_output = noise_scheduler.step(single_noise_pred, single_timestep, single_noisy_latents).pred_original_sample
+
+                    #     # 收集结果
+                    #     output_latents.append(step_output.pred_original_sample)
+
+                    # # 将结果堆叠回批次形式
+                    # output_latents = torch.cat(output_latents, dim=0)  # 形状: [2, 16, 7, 32, 32]
+
+                    # loss = my_mse_loss(output_latents, gt_latents)
+
+                    # if accelerator.is_main_process:
+                    #     if global_step % (len(train_dataloader) - 1) == 0 or global_step == 0:
+                    #         with torch.no_grad():
+                    #             video_predict_output = decode_latents(output_latents.to(weight_dtype), vae)
+                    #             video_predict_output = torch.from_numpy(video_predict_output)
+                    #             video_target = decode_latents(gt_latents, vae)
+                    #             video_target = torch.from_numpy(video_target)
+                    #             save_videos_grid(video_predict_output, os.path.join(args.output_dir, f"sample/sample-{global_step}-video_predict_output.gif"))
+                    #             save_videos_grid(video_target, os.path.join(args.output_dir, f"sample/sample-{global_step}-video_target.gif"))
 
                     if args.motion_sub_loss and noise_pred.size()[2] > 2:
                         gt_sub_noise = noise_pred[:, :, 1:].float() - noise_pred[:, :, :-1].float()

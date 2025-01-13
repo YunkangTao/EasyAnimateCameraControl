@@ -21,8 +21,8 @@ accelerate launch \
   --video_sample_size=512 \
   --video_sample_stride=1 \
   --video_sample_n_frames=49 \
-  --train_batch_size=1 \
-  --gradient_accumulation_steps=2 \
+  --train_batch_size=2 \
+  --gradient_accumulation_steps=1 \
   --dataloader_num_workers=8 \
   --num_train_epochs=3 \
   --checkpointing_steps=6778 \
@@ -30,7 +30,7 @@ accelerate launch \
   --lr_scheduler="constant_with_warmup" \
   --lr_warmup_steps=100 \
   --seed=42 \
-  --output_dir="output_dir_20250107_inpainting_with_mask_all_realestate" \
+  --output_dir="output_dir_20250111_inpainting_with_mask_all_realestate" \
   --gradient_checkpointing \
   --mixed_precision="bf16" \
   --adam_weight_decay=5e-3 \
