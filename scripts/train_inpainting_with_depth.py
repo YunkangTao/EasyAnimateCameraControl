@@ -86,7 +86,7 @@ from easyanimate.data.bucket_sampler import RandomSampler
 #     RandomSampler,
 #     get_closest_ratio,
 # )
-from easyanimate.data.dataset_inpainting_with_mask import (
+from easyanimate.data.dataset_inpainting_with_depth import (
     VideoSamplerWithMask,
     VideoDatasetWithMask,
 )
