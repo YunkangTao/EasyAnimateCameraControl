@@ -17,9 +17,9 @@ accelerate launch \
   --pretrained_model_name_or_path=$MODEL_NAME \
   --train_data_dir=$DATASET_NAME \
   --train_data_meta=$DATASET_META_NAME \
-  --config_path "config/easyanimate_video_v5_magvit_multi_text_encoder.yaml" \
+  --config_path "config/easyanimate_video_v5_magvit_multi_text_encoder_with_depth.yaml" \
   --video_sample_size=512 \
-  --video_sample_stride=1 \
+  --video_sample_stride=4 \
   --video_sample_n_frames=49 \
   --train_batch_size=2 \
   --gradient_accumulation_steps=1 \

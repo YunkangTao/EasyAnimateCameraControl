@@ -87,8 +87,8 @@ from easyanimate.data.bucket_sampler import RandomSampler
 #     get_closest_ratio,
 # )
 from easyanimate.data.dataset_inpainting_with_depth import (
-    VideoSamplerWithMask,
-    VideoDatasetWithMask,
+    VideoDatasetWithDepth,
+    VideoSamplerWithDepth,
 )
 from easyanimate.models import name_to_autoencoder_magvit, name_to_transformer3d
 from easyanimate.pipeline.pipeline_easyanimate import EasyAnimatePipeline
@@ -108,6 +108,8 @@ from easyanimate.utils import gaussian_diffusion as gd
 from easyanimate.utils.discrete_sampler import DiscreteSampling
 from easyanimate.utils.respace import SpacedDiffusion, space_timesteps
 from easyanimate.utils.utils import get_image_to_video_latent, save_videos_grid
+
+from EasyCamera.warp import get_mask_and_mask_pixel_value
 
 if is_wandb_available():
     import wandb
@@ -795,6 +797,32 @@ def decode_latents(latents, vae):
     return video
 
 
+def prepare_depth_anything(dav2_model, dav2_outdoor):
+    from extern.DepthAnythingV2.metric_depth.depth_anything_v2.dpt import (
+        DepthAnythingV2,
+    )
+
+    dav2_model_configs = {
+        'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
+        'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
+        'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
+    }
+
+    # Depth Anything V2
+    dav2_model_config = {
+        **dav2_model_configs[dav2_model],
+        # 20 for indoor model, 80 for outdoor model
+        'max_depth': 80 if dav2_outdoor else 20,
+    }
+    depth_anything = DepthAnythingV2(**dav2_model_config)
+
+    # Change the path to the
+    dav2_model_fn = f'depth_anything_v2_metric_{"vkitti" if dav2_outdoor else "hypersim"}_{dav2_model}.pth'
+    depth_anything.load_state_dict(torch.load(f'./models/checkpoints_dav2/{dav2_model_fn}', map_location='cpu'))
+
+    return depth_anything
+
+
 def main():
     args = parse_args()
 
@@ -935,6 +963,9 @@ def main():
         args.pretrained_model_name_or_path, subfolder="transformer", transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs'])
     )
 
+    # Get DepthAnythingV2
+    depth_anything = prepare_depth_anything(config['depth_anything_kwargs']['dav2_model'], config['depth_anything_kwargs']['dav2_outdoor'])
+
     # Get Image encoder
     if args.train_mode != "normal" and config['transformer_additional_kwargs'].get('enable_clip_in_inpaint', True):
         image_encoder = CLIPVisionModelWithProjection.from_pretrained(args.pretrained_model_name_or_path, subfolder="image_encoder")
@@ -949,6 +980,7 @@ def main():
     if config['text_encoder_kwargs'].get('enable_multi_text_encoder', False):
         text_encoder_2.requires_grad_(False)
     transformer3d.requires_grad_(False)
+    depth_anything.requires_grad_(False)
     if args.train_mode != "normal" and config['transformer_additional_kwargs'].get('enable_clip_in_inpaint', True):
         image_encoder.requires_grad_(False)
 
@@ -981,6 +1013,7 @@ def main():
 
     # A good trainable modules is showed below now.
     transformer3d.train()
+    depth_anything.train()
     if accelerator.is_main_process:
         accelerator.print(f"Trainable modules '{args.trainable_modules}'.")
     for name, param in transformer3d.named_parameters():
@@ -1016,8 +1049,11 @@ def main():
             if accelerator.is_main_process:
                 if args.use_ema:
                     ema_transformer3d.save_pretrained(os.path.join(output_dir, "transformer_ema"), max_shard_size="30GB")
+                    # ema_depth_anything.save_pretrained(os.path.join(output_dir, "depth_anything_ema"), max_shard_size="30GB")
 
                 models[0].save_pretrained(os.path.join(output_dir, "transformer"), max_shard_size="30GB")
+                torch.save(models[1].state_dict(), os.path.join(output_dir, "depth_anything.pth"))
+
                 if not args.use_deepspeed:
                     weights.pop()
 
@@ -1038,18 +1074,24 @@ def main():
                 ema_transformer3d.to(accelerator.device)
                 del load_model
 
-            for i in range(len(models)):
-                # pop models so that they are not loaded again
-                model = models.pop()
-
-                # load diffusers style into model
-                load_model = Choosen_Transformer3DModel.from_pretrained_2d(
-                    input_dir, subfolder="transformer", transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs'])
-                )
-                model.register_to_config(**load_model.config)
-
-                model.load_state_dict(load_model.state_dict())
-                del load_model
+            for i, model in enumerate(models):
+                if i == 0:
+                    # 加载 transformer3d 模型
+                    load_model = Choosen_Transformer3DModel.from_pretrained_2d(
+                        input_dir, subfolder="transformer", transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs'])
+                    )
+                    model.register_to_config(**load_model.config)
+                    model.load_state_dict(load_model.state_dict())
+                    del load_model
+                elif i == 1:
+                    # 加载 depth_anything 模型的状态字典
+                    depth_anything_state_path = os.path.join(input_dir, "depth_anything.pth")
+                    if os.path.exists(depth_anything_state_path):
+                        model.load_state_dict(torch.load(depth_anything_state_path, map_location=accelerator.device))
+                    else:
+                        raise FileNotFoundError(f"DepthAnything state dict not found at {depth_anything_state_path}")
+                else:
+                    raise ValueError(f"Unexpected model index {i}")
 
             pkl_path = os.path.join(input_dir, "sampler_pos_start.pkl")
             if os.path.exists(pkl_path):
@@ -1063,6 +1105,7 @@ def main():
 
     if args.gradient_checkpointing:
         transformer3d.enable_gradient_checkpointing()
+        depth_anything.enable_gradient_checkpointing()
 
     # Enable TF32 for faster training on Ampere GPUs,
     # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
@@ -1091,13 +1134,13 @@ def main():
         optimizer_cls = torch.optim.AdamW
 
     # Select trainable params
-    trainable_params = list(filter(lambda p: p.requires_grad, transformer3d.parameters()))
+    trainable_params = list(filter(lambda p: p.requires_grad, transformer3d.parameters())) + list(filter(lambda p: p.requires_grad, depth_anything.parameters()))
     trainable_params_optim = [
         {'params': [], 'lr': args.learning_rate},
         {'params': [], 'lr': args.learning_rate / 2},
     ]
     in_already = []
-    for name, param in transformer3d.named_parameters():
+    for name, param in transformer3d.named_parameters() + depth_anything.named_parameters():
         high_lr_flag = False
         if name in in_already:
             continue
@@ -1135,7 +1178,7 @@ def main():
     sample_n_frames_bucket_interval = vae.mini_batch_encoder if vae.quant_conv is None or vae.quant_conv.weight.ndim == 5 else 4
 
     # Get the dataset
-    train_dataset = VideoDatasetWithMask(
+    train_dataset = VideoDatasetWithDepth(
         args.train_data_meta,
         args.train_data_dir,
         video_sample_size=args.video_sample_size,
@@ -1147,7 +1190,7 @@ def main():
 
     # DataLoaders creation:
     batch_sampler_generator = torch.Generator().manual_seed(args.seed)
-    batch_sampler = VideoSamplerWithMask(
+    batch_sampler = VideoSamplerWithDepth(
         RandomSampler(train_dataset, generator=batch_sampler_generator),
         train_dataset,
         args.train_batch_size,
@@ -1175,7 +1218,7 @@ def main():
     )
 
     # Prepare everything with our `accelerator`.
-    transformer3d, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(transformer3d, optimizer, train_dataloader, lr_scheduler)
+    transformer3d, depth_anything, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(transformer3d, depth_anything, optimizer, train_dataloader, lr_scheduler)
 
     if args.use_ema:
         ema_transformer3d.to(accelerator.device)
@@ -1241,7 +1284,6 @@ def main():
             initial_global_step = 0
         else:
             global_step = int(path.split("-")[1])
-
             initial_global_step = global_step
 
             pkl_path = os.path.join(os.path.join(args.output_dir, path), "sampler_pos_start.pkl")
@@ -1291,12 +1333,10 @@ def main():
                     gif_name = '-'.join(text.replace('/', '').split()[:10]) if not text == '' else f'{global_step}-{idx}'
                     save_videos_grid(pixel_value, f"{args.output_dir}/sanity_check/{gif_name[:10]}.gif", rescale=True)
                 if args.train_mode != "normal":
-                    clip_pixel_values, mask_pixel_values, texts = batch['clip_pixel_values'].cpu(), batch['mask_pixel_values'].cpu(), batch['text']
-                    mask_pixel_values = rearrange(mask_pixel_values, "b f c h w -> b c f h w")
-                    for idx, (clip_pixel_value, pixel_value, text) in enumerate(zip(clip_pixel_values, mask_pixel_values, texts)):
+                    clip_pixel_values, texts = batch['clip_pixel_values'].cpu(), batch['text']
+                    for idx, (clip_pixel_value, text) in enumerate(zip(clip_pixel_values, texts)):
                         pixel_value = pixel_value[None, ...]
                         Image.fromarray(np.uint8(clip_pixel_value)).save(f"{args.output_dir}/sanity_check/clip_{gif_name[:10] if not text == '' else f'{global_step}-{idx}'}.png")
-                        save_videos_grid(pixel_value, f"{args.output_dir}/sanity_check/mask_{gif_name[:10] if not text == '' else f'{global_step}-{idx}'}.gif", rescale=True)
 
             with accelerator.accumulate(transformer3d):
                 # Convert images to latent space
@@ -1334,8 +1374,14 @@ def main():
 
                 if args.train_mode != "normal":
                     clip_pixel_values = batch["clip_pixel_values"]
-                    mask_pixel_values = batch["mask_pixel_values"].to(weight_dtype)
-                    mask = batch["mask"].to(weight_dtype)
+                    # mask_pixel_values = batch["mask_pixel_values"].to(weight_dtype)
+                    # mask = batch["mask"].to(weight_dtype)
+
+                    for clip_pixel_value in clip_pixel_values:
+                        numpy_clip_pixel_value = clip_pixel_value.cpu().numpy()
+                        depth = depth_anything.infer_image(numpy_clip_pixel_value[..., ::-1].copy())
+                        mask, mask_pixel_value = get_mask_and_mask_pixel_value(numpy_clip_pixel_value, depth)
+
                     # Increase the batch size when the length of the latent sequence of the current sample is small
                     if args.training_with_video_token_length:
                         if (

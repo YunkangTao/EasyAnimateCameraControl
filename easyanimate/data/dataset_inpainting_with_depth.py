@@ -105,7 +105,7 @@ VIDEO_READER_TIMEOUT = 20
 #     return mask
 
 
-class VideoSamplerWithMask(BatchSampler):
+class VideoSamplerWithDepth(BatchSampler):
     """A sampler wrapper for grouping images with similar aspect ratio into a same batch.
 
     Args:
@@ -163,39 +163,25 @@ def VideoReader_contextmanager(*args, **kwargs):
 
 
 def get_video_reader_batch(video_reader, batch_index):
-    total_frames = video_reader.get_batch(batch_index).asnumpy()
-
-    # 第一步：垂直分割成 2 行，每行高度为 512
-    rows = np.split(total_frames, 2, axis=1)  # 生成列表，包含 2 个数组，每个数组形状为 (25, 512, 1536, 3)
-
-    # 第二步：对每一行进行水平分割，分成 3 列，每列宽度为 512
-    videos = []
-    for row in rows:
-        cols = np.split(row, 3, axis=2)  # 每行分成 3 列，shape 为 (25, 512, 512, 3)
-        videos.extend(cols)  # 将分割后的列添加到 videos 列表中
-
-    pixel_values = videos[5]
-    masks = videos[4][:, :, :, 0:1]
-    mask_pixel_values = videos[2]
-
-    return pixel_values, masks, mask_pixel_values
+    frames = video_reader.get_batch(batch_index).asnumpy()
+    return frames
 
 
-# def resize_frame(frame, target_short_side):
-#     h, w, _ = frame.shape
-#     if h < w:
-#         if target_short_side > h:
-#             return frame
-#         new_h = target_short_side
-#         new_w = int(target_short_side * w / h)
-#     else:
-#         if target_short_side > w:
-#             return frame
-#         new_w = target_short_side
-#         new_h = int(target_short_side * h / w)
+def resize_frame(frame, target_short_side):
+    h, w, _ = frame.shape
+    if h < w:
+        if target_short_side > h:
+            return frame
+        new_h = target_short_side
+        new_w = int(target_short_side * w / h)
+    else:
+        if target_short_side > w:
+            return frame
+        new_w = target_short_side
+        new_h = int(target_short_side * h / w)
 
-#     resized_frame = cv2.resize(frame, (new_w, new_h))
-#     return resized_frame
+    resized_frame = cv2.resize(frame, (new_w, new_h))
+    return resized_frame
 
 
 def process_mask(masks, h, w):
@@ -230,14 +216,49 @@ def process_mask(masks, h, w):
     return masks
 
 
-class VideoDatasetWithMask(Dataset):
+def prepare_camera_poses(camera_pose_file):
+    whole_camera_para = []
+
+    with open(camera_pose_file, 'r', encoding='utf-8') as file:
+        # 读取所有行
+        lines = file.readlines()
+
+        title = lines[0].strip()
+
+        # 确保文件至少有两行
+        if len(lines) < 2:
+            print("文件内容不足两行，无法读取数据。")
+            return whole_camera_para
+
+        # 跳过第一行，从第二行开始处理
+        for idx, line in enumerate(lines[1:], start=2):
+            # 去除首尾空白字符并按空格分割
+            parts = line.strip().split()
+
+            # 检查每行是否有19个数字
+            if len(parts) != 19:
+                print(f"警告：第 {idx} 行的数字数量不是19，跳过该行。")
+                continue
+
+            try:
+                # 将字符串转换为浮点数
+                numbers = [float(part) for part in parts]
+                whole_camera_para.append(numbers)
+            except ValueError as ve:
+                print(f"警告：第 {idx} 行包含非数字字符，跳过该行。错误详情: {ve}")
+                continue
+
+    return title, whole_camera_para
+
+
+class VideoDatasetWithDepth(Dataset):
     def __init__(
         self,
         ann_path,
         data_root=None,
-        video_sample_size=256,
+        video_sample_size=512,
         video_sample_stride=4,
-        video_sample_n_frames=16,
+        video_sample_n_frames=49,
         # image_sample_size=512,
         # video_repeat=0,
         text_drop_ratio=-1,
@@ -306,90 +327,37 @@ class VideoDatasetWithMask(Dataset):
     def get_batch(self, idx):
         data_info = self.dataset[idx % len(self.dataset)]
 
-        # if data_info.get('type', 'image') == 'video':
-        video_id, text, data_type = data_info['video_file_path'], data_info['text'], data_info['type']
+        video_id, camera_id, text, data_type = data_info['video_file_path'], data_info['camera_file_path'], data_info['text'], data_info['type']
 
         if self.data_root is None:
             video_dir = video_id
+            camera_dir = camera_id
         else:
             video_dir = os.path.join(self.data_root, video_id)
+            camera_dir = os.path.join(self.data_root, camera_id)
+
+        title, camera_poses = prepare_camera_poses(camera_dir)
 
         with VideoReader_contextmanager(video_dir, num_threads=2) as video_reader:
-            # min_sample_n_frames = min(self.video_sample_n_frames, int(len(video_reader) * (self.video_length_drop_end - self.video_length_drop_start) // self.video_sample_stride))
-            # if min_sample_n_frames == 0:
-            #     raise ValueError(f"No Frames in video.")
+            min_sample_n_frames = min(self.video_sample_n_frames, int(len(video_reader) * (self.video_length_drop_end - self.video_length_drop_start) // self.video_sample_stride))
+            if min_sample_n_frames == 0:
+                raise ValueError(f"No Frames in video.")
 
-            # video_length = int(self.video_length_drop_end * len(video_reader))
-            # clip_length = min(video_length, (min_sample_n_frames - 1) * self.video_sample_stride + 1)
-            # start_idx = random.randint(int(self.video_length_drop_start * video_length), video_length - clip_length) if video_length != clip_length else 0
-            # batch_index = np.linspace(start_idx, start_idx + clip_length - 1, min_sample_n_frames, dtype=int)
-            # total_frames = len(video_reader)
-
-            # # 计算有效采样区域的起始和结束帧数
-            # start_drop = int(self.video_length_drop_start * total_frames)
-            # end_drop = int(self.video_length_drop_end * total_frames)
-            # valid_length = end_drop - start_drop  # 有效采样区域的总帧数
-
-            # if valid_length <= 0:
-            #     raise ValueError("有效采样区域的长度必须大于0。请检查 `video_length_drop_start` 和 `video_length_drop_end` 的设置。")
-
-            # # 动态计算 stride，使其在1到3之间，并尽可能接近 video_sample_n_frames
-            # # 尝试从 stride=3 开始，如果无法满足，则减小 stride
-            # for stride in range(3, 0, -1):
-            #     possible_max_frames = (valid_length + stride - 1) // stride  # 向上取整
-            #     if possible_max_frames >= self.video_sample_n_frames:
-            #         chosen_stride = stride
-            #         break
-            # else:
-            #     # 如果 stride=1 也无法满足，则选择 stride=1 并尽可能采样多的帧
-            #     chosen_stride = 1
-
-            # self.video_sample_stride = chosen_stride
-
-            # # 计算实际可以采样的帧数
-            # possible_frames = (valid_length + self.video_sample_stride - 1) // self.video_sample_stride
-
-            # if possible_frames < self.video_sample_n_frames:
-            #     raise ValueError(f"在设定的采样参数下，无法采样到足够的帧数。")
-
-            # min_sample_n_frames = min(self.video_sample_n_frames, possible_frames)
-
-            # if min_sample_n_frames == 0:
-            #     raise ValueError("在设定的采样参数下，无法采样到任何帧。")
-
-            # # 计算片段的总长度
-            # clip_length = (min_sample_n_frames - 1) * self.video_sample_stride + 1
-            # if clip_length > valid_length:
-            #     clip_length = valid_length
-            #     min_sample_n_frames = (clip_length + self.video_sample_stride - 1) // self.video_sample_stride
-
-            # # 随机选择起始索引
-            # if valid_length != clip_length:
-            #     start_idx_lower = start_drop
-            #     start_idx_upper = end_drop - clip_length
-            #     if start_idx_upper < start_idx_lower:
-            #         start_idx_upper = start_idx_lower  # 防止随机范围出现负值
-            #     start_idx = random.randint(start_idx_lower, start_idx_upper)
-            # else:
-            #     start_idx = start_drop
-
-            # # 生成采样帧的索引
-            # batch_index = np.linspace(start_idx, start_idx + clip_length - 1, min_sample_n_frames, dtype=int)
+            video_length = int(self.video_length_drop_end * len(video_reader))
+            clip_length = min(video_length, (min_sample_n_frames - 1) * self.video_sample_stride + 1)
+            start_idx = random.randint(int(self.video_length_drop_start * video_length), video_length - clip_length) if video_length != clip_length else 0
+            batch_index = np.linspace(start_idx, start_idx + clip_length - 1, min_sample_n_frames, dtype=int)
 
             try:
-                batch_index = np.arange(self.video_sample_n_frames)
                 sample_args = (video_reader, batch_index)
-                pixel_values, masks, mask_pixel_values = func_timeout(VIDEO_READER_TIMEOUT, get_video_reader_batch, args=sample_args)
-                # resized_frames = []
-                # resized_ground_truth = []
-                # for i in range(len(pixel_values)):
-                #     frame, gt_frame = pixel_values[i], ground_truth[i]
-                # resized_frame = resize_frame(frame, self.larger_side_of_image_and_video)
-                # resized_gt_frame = resize_frame(gt_frame, self.larger_side_of_image_and_video)
-                #     resized_frames.append(resized_frame)
-                #     resized_ground_truth.append(resized_gt_frame)
-                # pixel_values = np.array(resized_frames)
-                # ground_truth = np.array(resized_ground_truth)
+                pixel_values = func_timeout(VIDEO_READER_TIMEOUT, get_video_reader_batch, args=sample_args)
+                resized_frames = []
+                for i in range(len(pixel_values)):
+                    frame = pixel_values[i]
+                    resized_frame = resize_frame(frame, self.video_sample_size)
+                    resized_frames.append(resized_frame)
+
+                pixel_values = np.array(resized_frames)
             except FunctionTimedOut:
                 raise ValueError(f"Read {idx} timeout.")
             except Exception as e:
@@ -397,34 +365,21 @@ class VideoDatasetWithMask(Dataset):
 
             if not self.enable_bucket:
                 pixel_values = torch.from_numpy(pixel_values).permute(0, 3, 1, 2).contiguous()
-                mask_pixel_values = torch.from_numpy(mask_pixel_values).permute(0, 3, 1, 2).contiguous()
                 pixel_values = pixel_values / 255.0
-                mask_pixel_values = mask_pixel_values / 255.0
                 del video_reader
             else:
                 pixel_values = pixel_values
-                mask_pixel_values = mask_pixel_values
 
             if not self.enable_bucket:
                 pixel_values = self.video_transforms(pixel_values)
-                mask_pixel_values = self.video_transforms(mask_pixel_values)
 
             # Random use no text generation
             if random.random() < self.text_drop_ratio:
                 text = ''
-        return pixel_values, masks, mask_pixel_values, text, data_type
-        # else:
-        #     image_path, text = data_info['file_path'], data_info['text']
-        #     if self.data_root is not None:
-        #         image_path = os.path.join(self.data_root, image_path)
-        #     image = Image.open(image_path).convert('RGB')
-        #     if not self.enable_bucket:
-        #         image = self.image_transforms(image).unsqueeze(0)
-        #     else:
-        #         image = np.expand_dims(np.array(image), 0)
-        #     if random.random() < self.text_drop_ratio:
-        #         text = ''
-        #     return image, text, 'image'
+
+        camera_poses = [camera_poses[i] for i in batch_index]
+
+        return pixel_values, camera_poses, text, data_type
 
     def __len__(self):
         return self.length
@@ -440,8 +395,9 @@ class VideoDatasetWithMask(Dataset):
                 # if data_type_local != data_type:
                 #     raise ValueError("data_type_local != data_type")
 
-                pixel_values, masks, mask_pixel_values, text, data_type = self.get_batch(idx)
+                pixel_values, camera_poses, text, data_type = self.get_batch(idx)
                 sample["pixel_values"] = pixel_values
+                sample["camera_poses"] = camera_poses
                 sample["text"] = text
                 sample["type"] = data_type
                 sample["idx"] = idx
@@ -454,33 +410,30 @@ class VideoDatasetWithMask(Dataset):
 
         if self.enable_inpaint and not self.enable_bucket:
             # mask = get_random_mask(pixel_values.size())
-            h, w = pixel_values.shape[2], pixel_values.shape[3]  # torch.Size([25, 3, 256, 256])
-            masks = process_mask(masks, h, w)
-
-            mask_pixel_values = mask_pixel_values * (1 - masks) + torch.ones_like(mask_pixel_values) * -1 * masks
-            sample["mask_pixel_values"] = mask_pixel_values
-            sample["mask"] = masks
+            # mask_pixel_values = pixel_values * (1 - mask) + torch.ones_like(pixel_values) * -1 * mask
+            # sample["mask_pixel_values"] = mask_pixel_values
+            # sample["mask"] = mask
 
             clip_pixel_values = sample["pixel_values"][0].permute(1, 2, 0).contiguous()
             clip_pixel_values = (clip_pixel_values * 0.5 + 0.5) * 255
             sample["clip_pixel_values"] = clip_pixel_values
 
-            ref_pixel_values = sample["pixel_values"][0].unsqueeze(0)
-            if (masks == 1).all():
-                ref_pixel_values = torch.ones_like(ref_pixel_values) * -1
-            sample["ref_pixel_values"] = ref_pixel_values
+            # ref_pixel_values = sample["pixel_values"][0].unsqueeze(0)
+            # if (mask == 1).all():
+            #     ref_pixel_values = torch.ones_like(ref_pixel_values) * -1
+            # sample["ref_pixel_values"] = ref_pixel_values
 
         return sample
 
 
 if __name__ == "__main__":
-    # dataset = VideoDatasetWithMask(ann_path="test.json")
+    # dataset = VideoDatasetWithDepth(ann_path="test.json")
     # dataloader = torch.utils.data.DataLoader(dataset, batch_size=4, num_workers=16)
     # for idx, batch in enumerate(dataloader):
     #     print(batch["pixel_values"].shape, len(batch["text"]))
     from bucket_sampler import RandomSampler
 
-    train_dataset = VideoDatasetWithMask(
+    train_dataset = VideoDatasetWithDepth(
         "datasets/z_mini_datasets_warped_videos_2_3_test/metadata.json",
         "datasets/z_mini_datasets_warped_videos_2_3_test",
         video_sample_size=512,
@@ -492,7 +445,7 @@ if __name__ == "__main__":
 
     # DataLoaders creation:
     batch_sampler_generator = torch.Generator().manual_seed(42)
-    batch_sampler = VideoSamplerWithMask(RandomSampler(train_dataset, generator=batch_sampler_generator), train_dataset, 1)
+    batch_sampler = VideoSamplerWithDepth(RandomSampler(train_dataset, generator=batch_sampler_generator), train_dataset, 1)
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         batch_sampler=batch_sampler,
