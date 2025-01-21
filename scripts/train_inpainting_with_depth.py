@@ -15,13 +15,13 @@
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
-# import debugpy
+import debugpy
 
-# # 允许其他机器连接
-# debugpy.listen(("0.0.0.0", 5678))
-# print("等待调试器连接...")
-# debugpy.wait_for_client()  # 阻塞，直到调试器连接
-# print("调试器已连接")
+# 允许其他机器连接
+debugpy.listen(("0.0.0.0", 5678))
+print("等待调试器连接...")
+debugpy.wait_for_client()  # 阻塞，直到调试器连接
+print("调试器已连接")
 
 import argparse
 import gc
@@ -75,6 +75,8 @@ current_file_path = os.path.abspath(__file__)
 project_roots = [os.path.dirname(current_file_path), os.path.dirname(os.path.dirname(current_file_path))]
 for project_root in project_roots:
     sys.path.insert(0, project_root) if project_root not in sys.path else None
+import torch.nn as nn
+
 from easyanimate.data.bucket_sampler import RandomSampler
 
 # from easyanimate.data.bucket_sampler import (
@@ -108,7 +110,7 @@ from easyanimate.utils import gaussian_diffusion as gd
 from easyanimate.utils.discrete_sampler import DiscreteSampling
 from easyanimate.utils.respace import SpacedDiffusion, space_timesteps
 from easyanimate.utils.utils import get_image_to_video_latent, save_videos_grid
-
+from EasyCamera.match import get_match_points_from_dust3r
 from EasyCamera.warp import get_mask_and_mask_pixel_value
 
 if is_wandb_available():
@@ -1374,13 +1376,23 @@ def main():
 
                 if args.train_mode != "normal":
                     clip_pixel_values = batch["clip_pixel_values"]
+                    camera_poses = batch["camera_poses"]
+                    ori_hs = batch["ori_h"]
+                    ori_ws = batch["ori_w"]
                     # mask_pixel_values = batch["mask_pixel_values"].to(weight_dtype)
                     # mask = batch["mask"].to(weight_dtype)
 
-                    for clip_pixel_value in clip_pixel_values:
-                        numpy_clip_pixel_value = clip_pixel_value.cpu().numpy()
-                        depth = depth_anything.infer_image(numpy_clip_pixel_value[..., ::-1].copy())
-                        mask, mask_pixel_value = get_mask_and_mask_pixel_value(numpy_clip_pixel_value, depth)
+                    mask = []
+
+                    numpy_clip_pixel_values = clip_pixel_values.numpy()
+                    depths = depth_anything.infer_image(numpy_clip_pixel_values[..., ::-1].copy())
+
+                    for numpy_clip_pixel_value, depth, camera_pose, ori_h, ori_w in zip(numpy_clip_pixel_values, depths, camera_poses, ori_hs, ori_ws):
+                        one_mask = get_mask_and_mask_pixel_value(numpy_clip_pixel_value, depth, camera_pose, ori_h, ori_w, args.video_sample_size)
+                        mask.append(one_mask)
+
+                    mask = torch.tensor(mask, dtype=torch.uint8)
+                    mask_pixel_values = pixel_values * (1 - mask) + torch.ones_like(pixel_values) * -1 * mask
 
                     # Increase the batch size when the length of the latent sequence of the current sample is small
                     if args.training_with_video_token_length:
@@ -1738,7 +1750,7 @@ def main():
                     if noise_pred.size()[1] != vae.config.latent_channels:
                         noise_pred, _ = noise_pred.chunk(2, dim=1)
 
-                    def custom_mse_loss(noise_pred, target, threshold=50):
+                    def diffusion_mse_loss(noise_pred, target, threshold=50):
                         noise_pred = noise_pred.float()
                         target = target.float()
                         diff = noise_pred - target
@@ -1748,7 +1760,46 @@ def main():
                         final_loss = masked_loss.mean()
                         return final_loss
 
-                    loss = custom_mse_loss(noise_pred.float(), target.float())
+                    def pixel_mse_loss(output_latents, target):
+                        mse_loss = F.mse_loss(output_latents.float(), target.float(), reduction='mean')
+                        if mse_loss >= 1.0:
+                            return 0.0
+                        else:
+                            return mse_loss
+
+                    def match_loss_fn(warped_points, gt_points):
+                        return F.smooth_l1_loss(warped_points, gt_points, reduction='mean', beta=1.0)
+
+                    diffusion_loss = diffusion_mse_loss(noise_pred.float(), target.float())
+
+                    output_latents = []
+                    batch_size = noise_pred.size(0)
+
+                    for i in range(batch_size):
+                        # 提取单个样本的 noise_pred, timesteps, 和 noisy_latents
+                        single_noise_pred = noise_pred[i].unsqueeze(0)  # 形状: [1, 16, 7, 32, 32]
+                        single_timestep = timesteps[i].unsqueeze(0)  # 形状: [1]
+                        single_noisy_latents = noisy_latents[i].unsqueeze(0)  # 形状: [1, 16, 7, 32, 32]
+
+                        # 调用 step 方法
+                        step_output = noise_scheduler.step(single_noise_pred, single_timestep, single_noisy_latents).pred_original_sample
+
+                        # 收集结果
+                        output_latents.append(step_output)
+
+                    # 将结果堆叠回批次形式
+                    output_latents = torch.cat(output_latents, dim=0)  # 形状: [2, 16, 7, 32, 32]
+
+                    pixel_loss = pixel_mse_loss(output_latents, gt_latents)
+
+                    warped_points, gt_points = get_match_points_from_dust3r(pixel_values, mask_pixel_values, mask)
+                    match_loss = match_loss_fn(warped_points, gt_points)
+
+                    loss = (
+                        config['loss_weights']['lambda_diffusion'] * diffusion_loss
+                        + config['loss_weights']['lambda_pixel'] * pixel_loss
+                        + config['loss_weights']['lambda_match'] * match_loss
+                    )
 
                     # def my_mse_loss(output_latents, target):
                     #     mse_loss = F.mse_loss(output_latents.float(), target.float(), reduction='mean')

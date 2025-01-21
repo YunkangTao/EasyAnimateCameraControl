@@ -21,3 +21,8 @@ text_encoder_kwargs:
 depth_anything_kwargs:
   dav2_model: vits
   dav2_outdoor: true
+
+loss_weights:
+  lambda_diffusion: 0.85
+  lambda_pixel: 0.1
+  lambda_match: 0.05

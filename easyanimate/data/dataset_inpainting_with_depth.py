@@ -251,6 +251,98 @@ def prepare_camera_poses(camera_pose_file):
     return title, whole_camera_para
 
 
+def sample_video_frames(video_sample_n_frames=49, video_sample_stride=4, video_length=200, video_length_drop_start=0.1, video_length_drop_end=0.9):
+    """
+    从视频中采样指定数量的帧索引。
+
+    参数：
+        video_sample_n_frames (int): 需要采样的帧数，默认为49。
+        video_sample_stride (int): 采样的初始步长，默认为4。
+        video_length (int): 视频的总帧数。
+        video_length_drop_start (float): 需要舍弃的开头部分的比例（0-1），默认为0.1。
+        video_length_drop_end (float): 需要舍弃的结尾部分的比例（0-1），默认为0.9。
+
+    返回：
+        list: 包含49个帧索引的列表。
+    """
+    if video_length <= 0:
+        raise ValueError("video_length必须是正整数。")
+
+    # 计算舍弃后的起始和结束帧索引
+    frame_start = int(video_length * video_length_drop_start)
+    frame_end = int(video_length * video_length_drop_end)
+
+    # 确保frame_end不小于frame_start
+    if frame_end <= frame_start:
+        frame_start = 0
+        frame_end = video_length
+
+    available_frames = list(range(frame_start, frame_end))
+    total_available = len(available_frames)
+
+    # 如果没有可用帧，返回重复的起始帧
+    if total_available == 0:
+        return [0] * video_sample_n_frames
+
+    # 计算最大可能的 stride
+    max_stride = video_sample_stride
+    while max_stride > 1:
+        required_length = max_stride * (video_sample_n_frames - 1) + 1
+        if required_length <= total_available:
+            break
+        max_stride -= 1
+
+    stride = max_stride
+
+    sampled_indices = []
+
+    if stride >= 1 and stride * (video_sample_n_frames - 1) < total_available:
+        # 确定可以选择的起始帧范围
+        max_offset = total_available - stride * (video_sample_n_frames - 1) - 1
+        if max_offset < 0:
+            max_offset = 0
+        # 随机选择一个起始偏移量
+        offset = random.randint(0, max_offset)
+        first_frame = available_frames[offset]
+
+        # 生成采样帧索引
+        sampled_indices = [first_frame + stride * i for i in range(video_sample_n_frames)]
+
+        # 确保所有索引都在可用范围内
+        sampled_indices = [min(idx, frame_end - 1) for idx in sampled_indices]
+    else:
+        # 当 stride=1 且 available_frames < video_sample_n_frames 时，进行均匀重复采样
+        unique_frames = available_frames
+        unique_count = len(unique_frames)
+
+        if unique_count >= video_sample_n_frames:
+            # 如果可用帧足够，进行均匀采样
+            indices = np.linspace(0, unique_count - 1, video_sample_n_frames)
+            sampled_indices = [unique_frames[int(round(x))] for x in indices]
+        else:
+            # 需要重复帧以达到 video_sample_n_frames
+            # 计算每个帧应重复的次数
+            repeat, extra = divmod(video_sample_n_frames, unique_count)
+
+            sampled_indices = []
+            for i, frame in enumerate(unique_frames):
+                # 每个帧重复 'repeat' 次
+                sampled_indices.extend([frame] * repeat)
+                # 前 'extra' 个帧再多重复一次
+                if i < extra:
+                    sampled_indices.append(frame)
+
+    # 最终确保采样的帧数为 video_sample_n_frames
+    if len(sampled_indices) > video_sample_n_frames:
+        sampled_indices = sampled_indices[:video_sample_n_frames]
+    elif len(sampled_indices) < video_sample_n_frames:
+        # 补充最后一帧
+        last_frame = sampled_indices[-1]
+        sampled_indices.extend([last_frame] * (video_sample_n_frames - len(sampled_indices)))
+
+    return sampled_indices
+
+
 class VideoDatasetWithDepth(Dataset):
     def __init__(
         self,
@@ -323,6 +415,7 @@ class VideoDatasetWithDepth(Dataset):
         # )
 
         # self.larger_side_of_image_and_video = max(min(self.image_sample_size), min(self.video_sample_size))
+        self.short_side = min(self.video_sample_size)
 
     def get_batch(self, idx):
         data_info = self.dataset[idx % len(self.dataset)]
@@ -339,22 +432,28 @@ class VideoDatasetWithDepth(Dataset):
         title, camera_poses = prepare_camera_poses(camera_dir)
 
         with VideoReader_contextmanager(video_dir, num_threads=2) as video_reader:
-            min_sample_n_frames = min(self.video_sample_n_frames, int(len(video_reader) * (self.video_length_drop_end - self.video_length_drop_start) // self.video_sample_stride))
-            if min_sample_n_frames == 0:
-                raise ValueError(f"No Frames in video.")
+            # min_sample_n_frames = min(self.video_sample_n_frames, int(len(video_reader) * (self.video_length_drop_end - self.video_length_drop_start) // self.video_sample_stride))
+            # if min_sample_n_frames == 0:
+            #     raise ValueError(f"No Frames in video.")
 
-            video_length = int(self.video_length_drop_end * len(video_reader))
-            clip_length = min(video_length, (min_sample_n_frames - 1) * self.video_sample_stride + 1)
-            start_idx = random.randint(int(self.video_length_drop_start * video_length), video_length - clip_length) if video_length != clip_length else 0
-            batch_index = np.linspace(start_idx, start_idx + clip_length - 1, min_sample_n_frames, dtype=int)
+            # video_length = int(self.video_length_drop_end * len(video_reader))
+            # clip_length = min(video_length, (min_sample_n_frames - 1) * self.video_sample_stride + 1)
+            # start_idx = random.randint(int(self.video_length_drop_start * video_length), video_length - clip_length) if video_length != clip_length else 0
+            # batch_index = np.linspace(start_idx, start_idx + clip_length - 1, min_sample_n_frames, dtype=int)
+
+            batch_index = sample_video_frames(self.video_sample_n_frames, self.video_sample_stride, len(video_reader), self.video_length_drop_start, self.video_length_drop_end)
 
             try:
                 sample_args = (video_reader, batch_index)
                 pixel_values = func_timeout(VIDEO_READER_TIMEOUT, get_video_reader_batch, args=sample_args)
+
+                first_frame = video_reader[0].asnumpy()
+                ori_h, ori_w, channels = first_frame.shape
+
                 resized_frames = []
                 for i in range(len(pixel_values)):
                     frame = pixel_values[i]
-                    resized_frame = resize_frame(frame, self.video_sample_size)
+                    resized_frame = resize_frame(frame, self.short_side)
                     resized_frames.append(resized_frame)
 
                 pixel_values = np.array(resized_frames)
@@ -379,7 +478,7 @@ class VideoDatasetWithDepth(Dataset):
 
         camera_poses = [camera_poses[i] for i in batch_index]
 
-        return pixel_values, camera_poses, text, data_type
+        return pixel_values, camera_poses, text, data_type, ori_h, ori_w
 
     def __len__(self):
         return self.length
@@ -395,12 +494,14 @@ class VideoDatasetWithDepth(Dataset):
                 # if data_type_local != data_type:
                 #     raise ValueError("data_type_local != data_type")
 
-                pixel_values, camera_poses, text, data_type = self.get_batch(idx)
+                pixel_values, camera_poses, text, data_type, ori_h, ori_w = self.get_batch(idx)
                 sample["pixel_values"] = pixel_values
                 sample["camera_poses"] = camera_poses
                 sample["text"] = text
                 sample["type"] = data_type
                 sample["idx"] = idx
+                sample["ori_h"] = ori_h
+                sample["ori_w"] = ori_w
 
                 if len(sample) > 0:
                     break
@@ -434,10 +535,10 @@ if __name__ == "__main__":
     from bucket_sampler import RandomSampler
 
     train_dataset = VideoDatasetWithDepth(
-        "datasets/z_mini_datasets_warped_videos_2_3_test/metadata.json",
-        "datasets/z_mini_datasets_warped_videos_2_3_test",
+        "/mnt/chenyang_lei/Datasets/easyanimate_dataset/realestate_dataset/metadata.json",
+        "/mnt/chenyang_lei/Datasets/easyanimate_dataset",
         video_sample_size=512,
-        video_sample_stride=3,
+        video_sample_stride=4,
         video_sample_n_frames=49,
         enable_bucket=False,
         enable_inpaint=True,
