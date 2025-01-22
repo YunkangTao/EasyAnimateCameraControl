@@ -31,7 +31,7 @@ import os
 import pickle
 import shutil
 import sys
-
+import itertools
 import accelerate
 import diffusers
 import numpy as np
@@ -111,7 +111,7 @@ from easyanimate.utils.discrete_sampler import DiscreteSampling
 from easyanimate.utils.respace import SpacedDiffusion, space_timesteps
 from easyanimate.utils.utils import get_image_to_video_latent, save_videos_grid
 from EasyCamera.match import get_match_points_from_dust3r
-from EasyCamera.warp import get_mask_and_mask_pixel_value
+from EasyCamera.model import EasyCamera
 
 if is_wandb_available():
     import wandb
@@ -968,6 +968,8 @@ def main():
     # Get DepthAnythingV2
     depth_anything = prepare_depth_anything(config['depth_anything_kwargs']['dav2_model'], config['depth_anything_kwargs']['dav2_outdoor'])
 
+    easycamera = EasyCamera(transformer3d, depth_anything)
+
     # Get Image encoder
     if args.train_mode != "normal" and config['transformer_additional_kwargs'].get('enable_clip_in_inpaint', True):
         image_encoder = CLIPVisionModelWithProjection.from_pretrained(args.pretrained_model_name_or_path, subfolder="image_encoder")
@@ -981,8 +983,9 @@ def main():
     text_encoder.requires_grad_(False)
     if config['text_encoder_kwargs'].get('enable_multi_text_encoder', False):
         text_encoder_2.requires_grad_(False)
-    transformer3d.requires_grad_(False)
-    depth_anything.requires_grad_(False)
+    # transformer3d.requires_grad_(False)
+    # depth_anything.requires_grad_(False)
+    easycamera.requires_grad_(False)
     if args.train_mode != "normal" and config['transformer_additional_kwargs'].get('enable_clip_in_inpaint', True):
         image_encoder.requires_grad_(False)
 
@@ -997,7 +1000,8 @@ def main():
             state_dict = torch.load(args.transformer_path, map_location="cpu")
         state_dict = state_dict["state_dict"] if "state_dict" in state_dict else state_dict
 
-        m, u = transformer3d.load_state_dict(state_dict, strict=False)
+        # m, u = transformer3d.load_state_dict(state_dict, strict=False)
+        m, u = easycamera.easyanimate.load_state_dict(state_dict, strict=False)
         print(f"missing keys: {len(m)}, unexpected keys: {len(u)}")
 
     if args.vae_path is not None:
@@ -1014,47 +1018,25 @@ def main():
         print(f"missing keys: {len(m)}, unexpected keys: {len(u)}")
 
     # A good trainable modules is showed below now.
-    transformer3d.train()
-    depth_anything.train()
+    # transformer3d.train()
+    # depth_anything.train()
+    easycamera.train()
     if accelerator.is_main_process:
         accelerator.print(f"Trainable modules '{args.trainable_modules}'.")
-    for name, param in transformer3d.named_parameters():
+    for name, param in easycamera.named_parameters():
         for trainable_module_name in args.trainable_modules + args.trainable_modules_low_learning_rate:
             if trainable_module_name in name:
                 param.requires_grad = True
                 break
-
-    # Create EMA for the transformer3d.
-    if args.use_ema:
-        ema_transformer3d = Choosen_Transformer3DModel.from_pretrained_2d(
-            args.pretrained_model_name_or_path, subfolder="transformer", transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs'])
-        )
-        ema_transformer3d = EMAModel(ema_transformer3d.parameters(), model_cls=Choosen_Transformer3DModel, model_config=ema_transformer3d.config)
-
-    if args.enable_xformers_memory_efficient_attention and config['transformer_additional_kwargs'].get('transformer_type', 'Transformer3DModel') == 'Transformer3DModel':
-        if is_xformers_available():
-            import xformers
-
-            xformers_version = version.parse(xformers.__version__)
-            if xformers_version == version.parse("0.0.16"):
-                logger.warn(
-                    "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
-                )
-            transformer3d.enable_xformers_memory_efficient_attention()
-        else:
-            raise ValueError("xformers is not available. Make sure it is installed correctly")
 
     # `accelerate` 0.16.0 will have better support for customized saving
     if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
         # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
         def save_model_hook(models, weights, output_dir):
             if accelerator.is_main_process:
-                if args.use_ema:
-                    ema_transformer3d.save_pretrained(os.path.join(output_dir, "transformer_ema"), max_shard_size="30GB")
-                    # ema_depth_anything.save_pretrained(os.path.join(output_dir, "depth_anything_ema"), max_shard_size="30GB")
-
-                models[0].save_pretrained(os.path.join(output_dir, "transformer"), max_shard_size="30GB")
-                torch.save(models[1].state_dict(), os.path.join(output_dir, "depth_anything.pth"))
+                models.easyanimate.save_pretrained(os.path.join(output_dir, "transformer"), max_shard_size="30GB")
+                os.makedirs(os.path.join(output_dir, "dav2"), exist_ok=True)
+                torch.save(models.depth_anything_v2.state_dict(), os.path.join(output_dir, "dav2", "depth_anything.pth"))
 
                 if not args.use_deepspeed:
                     weights.pop()
@@ -1062,52 +1044,60 @@ def main():
                 with open(os.path.join(output_dir, "sampler_pos_start.pkl"), 'wb') as file:
                     pickle.dump([batch_sampler.sampler._pos_start, first_epoch], file)
 
+        # 定义加载钩子函数
         def load_model_hook(models, input_dir):
-            if args.use_ema:
-                ema_path = os.path.join(input_dir, "transformer_ema")
-                _, ema_kwargs = Choosen_Transformer3DModel.load_config(ema_path, return_unused_kwargs=True)
-                load_model = Choosen_Transformer3DModel.from_pretrained_2d(
-                    input_dir, subfolder="transformer_ema", transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs'])
+            # 确保目录存在并有效
+            transformer_dir = os.path.join(input_dir, "transformer")
+            depth_dir = os.path.join(input_dir, "dav2")
+
+            if not os.path.exists(transformer_dir):
+                raise FileNotFoundError(f"Transformer directory not found at {transformer_dir}")
+            if not os.path.exists(depth_dir):
+                raise FileNotFoundError(f"Dav2 directory not found at {depth_dir}")
+
+            # # 解除包装，获取原始 CombinedModel
+            # combined_model = unwrap_model(models.easyanimate, accelerator)  # 根据实际结构调整
+
+            # 加载 easyanimate 模型
+            if hasattr(models.easyanimate, "from_pretrained_2d"):
+                # 假设 EasyAnimate 有一个自定义的加载方法 from_pretrained_2d
+                loaded_easyanimate = Choosen_Transformer3DModel.from_pretrained_2d(
+                    transformer_dir, subfolder=".", transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs'])
                 )
-                load_model = EMAModel(load_model.parameters(), model_cls=Choosen_Transformer3DModel, model_config=load_model.config)
-                load_model.load_state_dict(ema_kwargs)
-
-                ema_transformer3d.load_state_dict(load_model.state_dict())
-                ema_transformer3d.to(accelerator.device)
-                del load_model
-
-            for i, model in enumerate(models):
-                if i == 0:
-                    # 加载 transformer3d 模型
-                    load_model = Choosen_Transformer3DModel.from_pretrained_2d(
-                        input_dir, subfolder="transformer", transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs'])
-                    )
-                    model.register_to_config(**load_model.config)
-                    model.load_state_dict(load_model.state_dict())
-                    del load_model
-                elif i == 1:
-                    # 加载 depth_anything 模型的状态字典
-                    depth_anything_state_path = os.path.join(input_dir, "depth_anything.pth")
-                    if os.path.exists(depth_anything_state_path):
-                        model.load_state_dict(torch.load(depth_anything_state_path, map_location=accelerator.device))
-                    else:
-                        raise FileNotFoundError(f"DepthAnything state dict not found at {depth_anything_state_path}")
+                models.easyanimate.register_to_config(**loaded_easyanimate.config)
+                models.easyanimate.load_state_dict(loaded_easyanimate.state_dict())
+                del loaded_easyanimate  # 释放内存
+            else:
+                # 如果 easyanimate 没有 from_pretrained_2d 方法，改用 torch.load
+                easyanimate_state_path = os.path.join(transformer_dir, "easyanimate.pth")
+                if os.path.exists(easyanimate_state_path):
+                    models.easyanimate.load_state_dict(torch.load(easyanimate_state_path, map_location=accelerator.device))
                 else:
-                    raise ValueError(f"Unexpected model index {i}")
+                    raise FileNotFoundError(f"EasyAnimate state dict not found at {easyanimate_state_path}")
 
-            pkl_path = os.path.join(input_dir, "sampler_pos_start.pkl")
-            if os.path.exists(pkl_path):
-                with open(pkl_path, 'rb') as file:
+            # 加载 depth_anything_v2 的 state_dict
+            depth_state_path = os.path.join(depth_dir, "depth_anything.pth")
+            if os.path.exists(depth_state_path):
+                models.depth_anything_v2.load_state_dict(torch.load(depth_state_path, map_location=accelerator.device))
+            else:
+                raise FileNotFoundError(f"DepthAnything state dict not found at {depth_state_path}")
+
+            # 加载 sampler 的状态
+            sampler_pkl_path = os.path.join(input_dir, "sampler_pos_start.pkl")
+            if os.path.exists(sampler_pkl_path):
+                with open(sampler_pkl_path, 'rb') as file:
                     loaded_number, _ = pickle.load(file)
                     batch_sampler.sampler._pos_start = max(loaded_number - args.dataloader_num_workers * accelerator.num_processes * 2, 0)
-                print(f"Load pkl from {pkl_path}. Get loaded_number = {loaded_number}.")
+                print(f"Loaded sampler state from {sampler_pkl_path}. Loaded number = {loaded_number}.")
+            else:
+                print(f"Sampler state file not found at {sampler_pkl_path}.")
 
         accelerator.register_save_state_pre_hook(save_model_hook)
         accelerator.register_load_state_pre_hook(load_model_hook)
 
-    if args.gradient_checkpointing:
-        transformer3d.enable_gradient_checkpointing()
-        depth_anything.enable_gradient_checkpointing()
+    # if args.gradient_checkpointing:
+    #     easycamera.enable_gradient_checkpointing()
+    # depth_anything.enable_gradient_checkpointing()
 
     # Enable TF32 for faster training on Ampere GPUs,
     # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
@@ -1136,13 +1126,13 @@ def main():
         optimizer_cls = torch.optim.AdamW
 
     # Select trainable params
-    trainable_params = list(filter(lambda p: p.requires_grad, transformer3d.parameters())) + list(filter(lambda p: p.requires_grad, depth_anything.parameters()))
+    trainable_params = list(filter(lambda p: p.requires_grad, easycamera.parameters()))
     trainable_params_optim = [
         {'params': [], 'lr': args.learning_rate},
         {'params': [], 'lr': args.learning_rate / 2},
     ]
     in_already = []
-    for name, param in transformer3d.named_parameters() + depth_anything.named_parameters():
+    for name, param in easycamera.named_parameters():
         high_lr_flag = False
         if name in in_already:
             continue
@@ -1220,10 +1210,10 @@ def main():
     )
 
     # Prepare everything with our `accelerator`.
-    transformer3d, depth_anything, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(transformer3d, depth_anything, optimizer, train_dataloader, lr_scheduler)
+    easycamera, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(easycamera, optimizer, train_dataloader, lr_scheduler)
 
-    if args.use_ema:
-        ema_transformer3d.to(accelerator.device)
+    # if args.use_ema:
+    #     ema_transformer3d.to(accelerator.device)
 
     # Move text_encode and vae to gpu and cast to weight_dtype
     vae.to(accelerator.device, dtype=weight_dtype)
@@ -1340,154 +1330,36 @@ def main():
                         pixel_value = pixel_value[None, ...]
                         Image.fromarray(np.uint8(clip_pixel_value)).save(f"{args.output_dir}/sanity_check/clip_{gif_name[:10] if not text == '' else f'{global_step}-{idx}'}.png")
 
-            with accelerator.accumulate(transformer3d):
-                # Convert images to latent space
-                pixel_values = batch["pixel_values"].to(weight_dtype)
-                # ground_truth = batch["ground_truth"].to(weight_dtype)
+            with accelerator.accumulate(easycamera):
 
-                # Increase the batch size when the length of the latent sequence of the current sample is small
-                if args.training_with_video_token_length:
-                    if (
-                        args.video_sample_n_frames * args.token_sample_size * args.token_sample_size // 16
-                        >= pixel_values.size()[1] * pixel_values.size()[3] * pixel_values.size()[4]
-                    ):
-                        pixel_values = torch.tile(pixel_values, (4, 1, 1, 1, 1))
-                        if args.enable_text_encoder_in_dataloader:
-                            batch['prompt_embeds'] = torch.tile(batch['prompt_embeds'], (4, 1, 1))
-                            batch['prompt_attention_mask'] = torch.tile(batch['prompt_attention_mask'], (4, 1))
-                            if config['text_encoder_kwargs'].get('enable_multi_text_encoder', False):
-                                batch['prompt_embeds_2'] = torch.tile(batch['prompt_embeds_2'], (4, 1, 1))
-                                batch['prompt_attention_mask_2'] = torch.tile(batch['prompt_attention_mask_2'], (4, 1))
-                        else:
-                            batch['text'] = batch['text'] * 4
-                    elif (
-                        args.video_sample_n_frames * args.token_sample_size * args.token_sample_size // 4
-                        >= pixel_values.size()[1] * pixel_values.size()[3] * pixel_values.size()[4]
-                    ):
-                        pixel_values = torch.tile(pixel_values, (2, 1, 1, 1, 1))
-                        if args.enable_text_encoder_in_dataloader:
-                            batch['prompt_embeds'] = torch.tile(batch['prompt_embeds'], (2, 1, 1))
-                            batch['prompt_attention_mask'] = torch.tile(batch['prompt_attention_mask'], (2, 1))
-                            if config['text_encoder_kwargs'].get('enable_multi_text_encoder', False):
-                                batch['prompt_embeds_2'] = torch.tile(batch['prompt_embeds_2'], (2, 1, 1))
-                                batch['prompt_attention_mask_2'] = torch.tile(batch['prompt_attention_mask_2'], (2, 1))
-                        else:
-                            batch['text'] = batch['text'] * 2
+                pixel_values = batch["pixel_values"].to(weight_dtype)  # torch.Size([2, 49, 3, 512, 512])
+                first_frames = batch["clip_pixel_values"]  # torch.Size([2, 512, 512, 3])
+                camera_poses = batch["camera_poses"]  # torch.Size([2, 49, 19])
+                ori_hs = batch["ori_h"]  # tensor([720, 720], device='cuda:0')
+                ori_ws = batch["ori_w"]  # tensor([1280, 1280], device='cuda:0')
 
-                if args.train_mode != "normal":
-                    clip_pixel_values = batch["clip_pixel_values"]
-                    camera_poses = batch["camera_poses"]
-                    ori_hs = batch["ori_h"]
-                    ori_ws = batch["ori_w"]
-                    # mask_pixel_values = batch["mask_pixel_values"].to(weight_dtype)
-                    # mask = batch["mask"].to(weight_dtype)
+                # mask = []
 
-                    mask = []
+                # numpy_clip_pixel_values = clip_pixel_values.numpy()
+                # depths = depth_anything.infer_image(numpy_clip_pixel_values[..., ::-1].copy())
 
-                    numpy_clip_pixel_values = clip_pixel_values.numpy()
-                    depths = depth_anything.infer_image(numpy_clip_pixel_values[..., ::-1].copy())
+                # for numpy_clip_pixel_value, depth, camera_pose, ori_h, ori_w in zip(numpy_clip_pixel_values, depths, camera_poses, ori_hs, ori_ws):
+                #     one_mask = get_mask_and_mask_pixel_value(numpy_clip_pixel_value, depth, camera_pose, ori_h, ori_w, args.video_sample_size)
+                #     mask.append(one_mask)
 
-                    for numpy_clip_pixel_value, depth, camera_pose, ori_h, ori_w in zip(numpy_clip_pixel_values, depths, camera_poses, ori_hs, ori_ws):
-                        one_mask = get_mask_and_mask_pixel_value(numpy_clip_pixel_value, depth, camera_pose, ori_h, ori_w, args.video_sample_size)
-                        mask.append(one_mask)
+                # mask = torch.tensor(mask, dtype=torch.uint8)
+                # mask_pixel_values = pixel_values * (1 - mask) + torch.ones_like(pixel_values) * -1 * mask
 
-                    mask = torch.tensor(mask, dtype=torch.uint8)
-                    mask_pixel_values = pixel_values * (1 - mask) + torch.ones_like(pixel_values) * -1 * mask
-
-                    # Increase the batch size when the length of the latent sequence of the current sample is small
-                    if args.training_with_video_token_length:
-                        if (
-                            args.video_sample_n_frames * args.token_sample_size * args.token_sample_size // 16
-                            >= pixel_values.size()[1] * pixel_values.size()[3] * pixel_values.size()[4]
-                        ):
-                            clip_pixel_values = torch.tile(clip_pixel_values, (4, 1, 1, 1))
-                            mask_pixel_values = torch.tile(mask_pixel_values, (4, 1, 1, 1, 1))
-                            mask = torch.tile(mask, (4, 1, 1, 1, 1))
-                        elif (
-                            args.video_sample_n_frames * args.token_sample_size * args.token_sample_size // 4
-                            >= pixel_values.size()[1] * pixel_values.size()[3] * pixel_values.size()[4]
-                        ):
-                            clip_pixel_values = torch.tile(clip_pixel_values, (2, 1, 1, 1))
-                            mask_pixel_values = torch.tile(mask_pixel_values, (2, 1, 1, 1, 1))
-                            mask = torch.tile(mask, (2, 1, 1, 1, 1))
-
-                # Random crop number of frames to adapt different frames of video.
-                if args.random_frame_crop:
-
-                    def _create_special_list(length):
-                        if length == 1:
-                            return [1.0]
-                        if length >= 2:
-                            last_element = 0.90
-                            remaining_sum = 1.0 - last_element
-                            other_elements_value = remaining_sum / (length - 1)
-                            special_list = [other_elements_value] * (length - 1) + [last_element]
-                            return special_list
-
-                    if vae.cache_mag_vae:
-                        select_frames = [
-                            _tmp
-                            for _tmp in list(
-                                range(sample_n_frames_bucket_interval + 1, args.video_sample_n_frames + sample_n_frames_bucket_interval, sample_n_frames_bucket_interval)
-                            )
-                        ]
-                    else:
-                        select_frames = [
-                            _tmp
-                            for _tmp in list(range(sample_n_frames_bucket_interval, args.video_sample_n_frames + sample_n_frames_bucket_interval, sample_n_frames_bucket_interval))
-                        ]
-                    select_frames_prob = np.array(_create_special_list(len(select_frames)))
-
-                    if rng is None:
-                        temp_n_frames = np.random.choice(select_frames, p=select_frames_prob)
-                    else:
-                        temp_n_frames = rng.choice(select_frames, p=select_frames_prob)
-
-                    pixel_values = pixel_values[:, :temp_n_frames, :, :]
-
-                    if args.train_mode != "normal":
-                        mask_pixel_values = mask_pixel_values[:, :temp_n_frames, :, :]
-                        mask = mask[:, :temp_n_frames, :, :]
-
-                # Keep all node same token length to accelerate the traning when resolution grows.
-                if args.keep_all_node_same_token_length:
-                    if args.token_sample_size > 256:
-                        numbers_list = list(range(256, args.token_sample_size + 1, 128))
-
-                        if numbers_list[-1] != args.token_sample_size:
-                            numbers_list.append(args.token_sample_size)
-                    else:
-                        numbers_list = [256]
-                    numbers_list = [_number * _number * args.video_sample_n_frames for _number in numbers_list]
-
-                    actual_token_length = index_rng.choice(numbers_list)
-                    if vae.cache_mag_vae:
-                        actual_video_length = (
-                            min(actual_token_length / pixel_values.size()[-1] / pixel_values.size()[-2], args.video_sample_n_frames) - 1
-                        ) // sample_n_frames_bucket_interval * sample_n_frames_bucket_interval + 1
-                    else:
-                        actual_video_length = (
-                            min(actual_token_length / pixel_values.size()[-1] / pixel_values.size()[-2], args.video_sample_n_frames)
-                            // sample_n_frames_bucket_interval
-                            * sample_n_frames_bucket_interval
-                        )
-                    actual_video_length = int(max(actual_video_length, 1))
-
-                    pixel_values = pixel_values[:, :actual_video_length, :, :]
-                    if args.train_mode != "normal":
-                        mask_pixel_values = mask_pixel_values[:, :actual_video_length, :, :]
-                        mask = mask[:, :actual_video_length, :, :]
-
-                # Make the inpaint latents to be zeros.
-                if args.train_mode != "normal":
-                    t2v_flag = [(_mask == 1).all() for _mask in mask]
-                    new_t2v_flag = []
-                    for _mask in t2v_flag:
-                        if _mask and np.random.rand() < 0.90:
-                            new_t2v_flag.append(0)
-                        else:
-                            new_t2v_flag.append(1)
-                    t2v_flag = torch.from_numpy(np.array(new_t2v_flag)).to(accelerator.device, dtype=weight_dtype)
+                # # Make the inpaint latents to be zeros.
+                # if args.train_mode != "normal":
+                #     t2v_flag = [(_mask == 1).all() for _mask in mask]
+                #     new_t2v_flag = []
+                #     for _mask in t2v_flag:
+                #         if _mask and np.random.rand() < 0.90:
+                #             new_t2v_flag.append(0)
+                #         else:
+                #             new_t2v_flag.append(1)
+                #     t2v_flag = torch.from_numpy(np.array(new_t2v_flag)).to(accelerator.device, dtype=weight_dtype)
 
                 # Reduce the vram by offload vae and text encoders
                 if args.low_vram:
@@ -1540,60 +1412,35 @@ def main():
                     latents = latents * vae.config.scaling_factor
                     gt_latents = gt_latents * vae.config.scaling_factor
 
-                    if args.train_mode != "normal":
-                        # Encode masks.
-                        if config['transformer_additional_kwargs'].get('resize_inpaint_mask_directly', False):
-                            mask = rearrange(mask, "b f c h w -> b c f h w")
-                            mask = 1 - mask
-                            mask = resize_mask(mask, latents, vae.cache_mag_vae)
-                        else:
-                            mask = torch.tile(mask, [1, 1, 3, 1, 1])
-                            if vae_stream_2 is not None:
-                                vae_stream_2.wait_stream(torch.cuda.current_stream())
-                                with torch.cuda.stream(vae_stream_2):
-                                    mask = _batch_encode_vae(mask)
-                            else:
-                                mask = _batch_encode_vae(mask)
+                    # if args.train_mode != "normal":
+                    # # Encode masks.
+                    # if config['transformer_additional_kwargs'].get('resize_inpaint_mask_directly', False):
+                    #     mask = rearrange(mask, "b f c h w -> b c f h w")
+                    #     mask = 1 - mask
+                    #     mask = resize_mask(mask, latents, vae.cache_mag_vae)
+                    # else:
+                    #     mask = torch.tile(mask, [1, 1, 3, 1, 1])
+                    #     if vae_stream_2 is not None:
+                    #         vae_stream_2.wait_stream(torch.cuda.current_stream())
+                    #         with torch.cuda.stream(vae_stream_2):
+                    #             mask = _batch_encode_vae(mask)
+                    #     else:
+                    #         mask = _batch_encode_vae(mask)
 
-                        if unwrap_model(transformer3d).config.add_noise_in_inpaint_model:
-                            mask_pixel_values = add_noise_to_reference_video(mask_pixel_values)
-                        # Encode inpaint latents.
-                        mask_latents = _batch_encode_vae(mask_pixel_values)
-                        if vae_stream_2 is not None:
-                            torch.cuda.current_stream().wait_stream(vae_stream_2)
+                    # if unwrap_model(transformer3d).config.add_noise_in_inpaint_model:
+                    #     mask_pixel_values = add_noise_to_reference_video(mask_pixel_values)
+                    # # Encode inpaint latents.
+                    # mask_latents = _batch_encode_vae(mask_pixel_values)
+                    # if vae_stream_2 is not None:
+                    #     torch.cuda.current_stream().wait_stream(vae_stream_2)
 
-                        inpaint_latents = torch.concat([mask, mask_latents], dim=1)
-                        inpaint_latents = t2v_flag[:, None, None, None, None] * inpaint_latents
-                        inpaint_latents = inpaint_latents * vae.config.scaling_factor
+                    # inpaint_latents = torch.concat([mask, mask_latents], dim=1)
+                    # inpaint_latents = t2v_flag[:, None, None, None, None] * inpaint_latents
+                    # inpaint_latents = inpaint_latents * vae.config.scaling_factor
 
-                        # Encode Vision CLIP latents
-                        with torch.no_grad():
-                            if config['transformer_additional_kwargs'].get('enable_clip_in_inpaint', True):
-                                clip_encoder_hidden_states = []
-                                for clip_pixel_value in clip_pixel_values:
-                                    image = Image.fromarray(np.uint8(clip_pixel_value.cpu().numpy()))
-                                    inputs = image_processor(images=image, return_tensors="pt")
-                                    inputs["pixel_values"] = inputs["pixel_values"].to(accelerator.device, dtype=weight_dtype)
-                                    if config['text_encoder_kwargs'].get('enable_multi_text_encoder', False):
-                                        outputs = image_encoder(**inputs).last_hidden_state[0, 1:]
-                                    else:
-                                        outputs = image_encoder(**inputs).image_embeds[0]
-                                    clip_encoder_hidden_states.append(outputs)
-                                clip_encoder_hidden_states = torch.stack(clip_encoder_hidden_states)
-                                bsc = clip_encoder_hidden_states.shape[0]
-
-                                if config['text_encoder_kwargs'].get('enable_multi_text_encoder', False):
-                                    clip_attention_mask = (
-                                        torch.ones([bsc, unwrap_model(transformer3d).n_query])
-                                        if np.random.rand() < 0.50
-                                        else torch.zeros([bsc, unwrap_model(transformer3d).n_query])
-                                    )
-                                else:
-                                    clip_attention_mask = torch.ones([bsc, 8]) if np.random.rand() < 0.50 else torch.zeros([bsc, 8])
-                                clip_attention_mask = clip_attention_mask.to(accelerator.device, dtype=weight_dtype)
-                            else:
-                                clip_encoder_hidden_states = None
-                                clip_attention_mask = None
+                    # Encode Vision CLIP latents
+                    clip_encoder_hidden_states = None
+                    clip_attention_mask = None
 
                 # wait for latents = vae.encode(pixel_values) to complete
                 if vae_stream_1 is not None:
@@ -1685,191 +1532,201 @@ def main():
                 timesteps = idx_sampling(bsz, generator=torch_rng, device=latents.device)
                 timesteps = timesteps.long()
 
-                if args.not_sigma_loss:
-                    # Create image_rotary_emb, style embedding & time ids
-                    height, width = batch["pixel_values"].size()[-2], batch["pixel_values"].size()[-1]
+                # if args.not_sigma_loss:
+                # Create image_rotary_emb, style embedding & time ids
+                height, width = batch["pixel_values"].size()[-2], batch["pixel_values"].size()[-1]
 
-                    # Get 3D rope or 2d rope
-                    grid_height = height // 8 // unwrap_model(transformer3d).config.patch_size
-                    grid_width = width // 8 // unwrap_model(transformer3d).config.patch_size
-                    if unwrap_model(transformer3d).config.get("time_position_encoding_type", "2d_rope") == "3d_rope":
-                        base_size_width = 720 // 8 // unwrap_model(transformer3d).config.patch_size
-                        base_size_height = 480 // 8 // unwrap_model(transformer3d).config.patch_size
-                        grid_crops_coords = get_resize_crop_region_for_grid((grid_height, grid_width), base_size_width, base_size_height)
-                        image_rotary_emb = _get_3d_rotary_pos_embed_cached(
-                            unwrap_model(transformer3d).config.attention_head_dim,
-                            grid_crops_coords,
-                            (grid_height, grid_width),
-                            latents.size()[2],
-                        )
-                    else:
-                        base_size = 512 // 8 // unwrap_model(transformer3d).config.patch_size
-                        grid_crops_coords = get_resize_crop_region_for_grid((grid_height, grid_width), base_size, base_size)
-                        image_rotary_emb = _get_2d_rotary_pos_embed_cached(unwrap_model(transformer3d).config.attention_head_dim, grid_crops_coords, (grid_height, grid_width))
-
-                    # Get other hunyuan params
-                    style = torch.tensor([0], device=latents.device)
-                    target_size = (height, width)
-                    add_time_ids = list((1024, 1024) + target_size + (0, 0))
-                    add_time_ids = torch.tensor([add_time_ids], dtype=prompt_embeds.dtype)
-
-                    # To latents.device
-                    prompt_embeds = prompt_embeds.to(device=latents.device)
-                    prompt_attention_mask = prompt_attention_mask.to(device=latents.device)
-                    if prompt_embeds_2 is not None:
-                        prompt_embeds_2 = prompt_embeds_2.to(device=latents.device)
-                        prompt_attention_mask_2 = prompt_attention_mask_2.to(device=latents.device)
-                    add_time_ids = add_time_ids.to(dtype=prompt_embeds.dtype, device=latents.device).repeat(bsz, 1)
-                    style = style.to(device=latents.device).repeat(bsz)
-
-                    # Add noise
-                    noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
-                    if noise_scheduler.config.prediction_type == "epsilon":
-                        target = noise
-                    elif noise_scheduler.config.prediction_type == "v_prediction":
-                        target = noise_scheduler.get_velocity(latents, noise, timesteps)
-                    else:
-                        raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
-
-                    # Predict the noise residual
-                    noise_pred = transformer3d(
-                        noisy_latents,
-                        timesteps.to(noisy_latents.dtype),
-                        encoder_hidden_states=prompt_embeds,
-                        text_embedding_mask=prompt_attention_mask,
-                        encoder_hidden_states_t5=prompt_embeds_2,
-                        text_embedding_mask_t5=prompt_attention_mask_2,
-                        image_meta_size=add_time_ids,
-                        style=style,
-                        image_rotary_emb=image_rotary_emb,
-                        inpaint_latents=inpaint_latents if args.train_mode != "normal" else None,
-                        clip_encoder_hidden_states=clip_encoder_hidden_states if args.train_mode != "normal" else None,
-                        clip_attention_mask=clip_attention_mask if args.train_mode != "normal" else None,
-                        return_dict=False,
-                    )[0]
-                    if noise_pred.size()[1] != vae.config.latent_channels:
-                        noise_pred, _ = noise_pred.chunk(2, dim=1)
-
-                    def diffusion_mse_loss(noise_pred, target, threshold=50):
-                        noise_pred = noise_pred.float()
-                        target = target.float()
-                        diff = noise_pred - target
-                        mse_loss = F.mse_loss(noise_pred, target, reduction='none')
-                        mask = (diff.abs() <= threshold).float()
-                        masked_loss = mse_loss * mask
-                        final_loss = masked_loss.mean()
-                        return final_loss
-
-                    def pixel_mse_loss(output_latents, target):
-                        mse_loss = F.mse_loss(output_latents.float(), target.float(), reduction='mean')
-                        if mse_loss >= 1.0:
-                            return 0.0
-                        else:
-                            return mse_loss
-
-                    def match_loss_fn(warped_points, gt_points):
-                        return F.smooth_l1_loss(warped_points, gt_points, reduction='mean', beta=1.0)
-
-                    diffusion_loss = diffusion_mse_loss(noise_pred.float(), target.float())
-
-                    output_latents = []
-                    batch_size = noise_pred.size(0)
-
-                    for i in range(batch_size):
-                        # 提取单个样本的 noise_pred, timesteps, 和 noisy_latents
-                        single_noise_pred = noise_pred[i].unsqueeze(0)  # 形状: [1, 16, 7, 32, 32]
-                        single_timestep = timesteps[i].unsqueeze(0)  # 形状: [1]
-                        single_noisy_latents = noisy_latents[i].unsqueeze(0)  # 形状: [1, 16, 7, 32, 32]
-
-                        # 调用 step 方法
-                        step_output = noise_scheduler.step(single_noise_pred, single_timestep, single_noisy_latents).pred_original_sample
-
-                        # 收集结果
-                        output_latents.append(step_output)
-
-                    # 将结果堆叠回批次形式
-                    output_latents = torch.cat(output_latents, dim=0)  # 形状: [2, 16, 7, 32, 32]
-
-                    pixel_loss = pixel_mse_loss(output_latents, gt_latents)
-
-                    warped_points, gt_points = get_match_points_from_dust3r(pixel_values, mask_pixel_values, mask)
-                    match_loss = match_loss_fn(warped_points, gt_points)
-
-                    loss = (
-                        config['loss_weights']['lambda_diffusion'] * diffusion_loss
-                        + config['loss_weights']['lambda_pixel'] * pixel_loss
-                        + config['loss_weights']['lambda_match'] * match_loss
+                # Get 3D rope or 2d rope
+                grid_height = height // 8 // unwrap_model(transformer3d).config.patch_size
+                grid_width = width // 8 // unwrap_model(transformer3d).config.patch_size
+                if unwrap_model(transformer3d).config.get("time_position_encoding_type", "2d_rope") == "3d_rope":
+                    base_size_width = 720 // 8 // unwrap_model(transformer3d).config.patch_size
+                    base_size_height = 480 // 8 // unwrap_model(transformer3d).config.patch_size
+                    grid_crops_coords = get_resize_crop_region_for_grid((grid_height, grid_width), base_size_width, base_size_height)
+                    image_rotary_emb = _get_3d_rotary_pos_embed_cached(
+                        unwrap_model(transformer3d).config.attention_head_dim,
+                        grid_crops_coords,
+                        (grid_height, grid_width),
+                        latents.size()[2],
                     )
-
-                    # def my_mse_loss(output_latents, target):
-                    #     mse_loss = F.mse_loss(output_latents.float(), target.float(), reduction='mean')
-                    #     if mse_loss >= 1.0:
-                    #         return 0.0
-                    #     else:
-                    #         return mse_loss
-
-                    # output_latents = noise_scheduler.step(noise_pred, timesteps, noisy_latents).pred_original_sample
-                    # output_latents = []
-                    # batch_size = noise_pred.size(0)
-
-                    # for i in range(batch_size):
-                    #     # 提取单个样本的 noise_pred, timesteps, 和 noisy_latents
-                    #     single_noise_pred = noise_pred[i].unsqueeze(0)  # 形状: [1, 16, 7, 32, 32]
-                    #     single_timestep = timesteps[i].unsqueeze(0)  # 形状: [1]
-                    #     single_noisy_latents = noisy_latents[i].unsqueeze(0)  # 形状: [1, 16, 7, 32, 32]
-
-                    #     # 调用 step 方法
-                    #     step_output = noise_scheduler.step(single_noise_pred, single_timestep, single_noisy_latents).pred_original_sample
-
-                    #     # 收集结果
-                    #     output_latents.append(step_output.pred_original_sample)
-
-                    # # 将结果堆叠回批次形式
-                    # output_latents = torch.cat(output_latents, dim=0)  # 形状: [2, 16, 7, 32, 32]
-
-                    # loss = my_mse_loss(output_latents, gt_latents)
-
-                    # if accelerator.is_main_process:
-                    #     if global_step % (len(train_dataloader) - 1) == 0 or global_step == 0:
-                    #         with torch.no_grad():
-                    #             video_predict_output = decode_latents(output_latents.to(weight_dtype), vae)
-                    #             video_predict_output = torch.from_numpy(video_predict_output)
-                    #             video_target = decode_latents(gt_latents, vae)
-                    #             video_target = torch.from_numpy(video_target)
-                    #             save_videos_grid(video_predict_output, os.path.join(args.output_dir, f"sample/sample-{global_step}-video_predict_output.gif"))
-                    #             save_videos_grid(video_target, os.path.join(args.output_dir, f"sample/sample-{global_step}-video_target.gif"))
-
-                    if args.motion_sub_loss and noise_pred.size()[2] > 2:
-                        gt_sub_noise = noise_pred[:, :, 1:].float() - noise_pred[:, :, :-1].float()
-                        pre_sub_noise = target[:, :, 1:].float() - target[:, :, :-1].float()
-                        sub_loss = F.mse_loss(gt_sub_noise, pre_sub_noise, reduction="mean")
-                        loss = loss * (1 - args.motion_sub_loss_ratio) + sub_loss * args.motion_sub_loss_ratio
                 else:
-                    added_cond_kwargs = {"resolution": None, "aspect_ratio": None}
-                    if unwrap_model(transformer3d).config.sample_size == 128:
-                        bs, height, width = bsz, batch["pixel_values"].size()[-2], batch["pixel_values"].size()[-1]
-                        resolution = torch.tensor([height, width]).repeat(bs, 1)
-                        aspect_ratio = torch.tensor([float(height / width)]).repeat(bs, 1)
-                        resolution = resolution.to(accelerator.device, dtype=weight_dtype)
-                        aspect_ratio = aspect_ratio.to(accelerator.device, dtype=weight_dtype)
-                        added_cond_kwargs = {"resolution": resolution, "aspect_ratio": aspect_ratio}
+                    base_size = 512 // 8 // unwrap_model(transformer3d).config.patch_size
+                    grid_crops_coords = get_resize_crop_region_for_grid((grid_height, grid_width), base_size, base_size)
+                    image_rotary_emb = _get_2d_rotary_pos_embed_cached(unwrap_model(transformer3d).config.attention_head_dim, grid_crops_coords, (grid_height, grid_width))
 
-                    loss_term = train_diffusion.training_losses(
-                        transformer3d,
-                        latents,
-                        timesteps,
-                        noise=noise,
-                        model_kwargs=dict(
-                            encoder_hidden_states=prompt_embeds,
-                            encoder_attention_mask=prompt_attention_mask,
-                            added_cond_kwargs=added_cond_kwargs,
-                            inpaint_latents=inpaint_latents if args.train_mode != "normal" else None,
-                            clip_encoder_hidden_states=clip_encoder_hidden_states if args.train_mode != "normal" else None,
-                            clip_attention_mask=clip_attention_mask if args.train_mode != "normal" else None,
-                            return_dict=False,
-                        ),
-                    )
-                    loss = loss_term['loss'].mean()
+                # Get other hunyuan params
+                style = torch.tensor([0], device=latents.device)
+                target_size = (height, width)
+                add_time_ids = list((1024, 1024) + target_size + (0, 0))
+                add_time_ids = torch.tensor([add_time_ids], dtype=prompt_embeds.dtype)
+
+                # To latents.device
+                prompt_embeds = prompt_embeds.to(device=latents.device)
+                prompt_attention_mask = prompt_attention_mask.to(device=latents.device)
+                if prompt_embeds_2 is not None:
+                    prompt_embeds_2 = prompt_embeds_2.to(device=latents.device)
+                    prompt_attention_mask_2 = prompt_attention_mask_2.to(device=latents.device)
+                add_time_ids = add_time_ids.to(dtype=prompt_embeds.dtype, device=latents.device).repeat(bsz, 1)
+                style = style.to(device=latents.device).repeat(bsz)
+
+                # Add noise
+                noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+                if noise_scheduler.config.prediction_type == "epsilon":
+                    target = noise
+                elif noise_scheduler.config.prediction_type == "v_prediction":
+                    target = noise_scheduler.get_velocity(latents, noise, timesteps)
+                else:
+                    raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
+
+                # Predict the noise residual
+                noise_pred, mask_pixel_values, mask = easycamera(
+                    first_frames,
+                    camera_poses,
+                    ori_hs,
+                    ori_ws,
+                    args.video_sample_size,
+                    pixel_values,
+                    weight_dtype,
+                    accelerator.device,
+                    latents,
+                    vae,
+                    args.vae_mini_batch,
+                    video_length,
+                    noisy_latents,
+                    timesteps.to(noisy_latents.dtype),
+                    prompt_embeds,
+                    prompt_attention_mask,
+                    prompt_embeds_2,
+                    prompt_attention_mask_2,
+                    add_time_ids,
+                    style,
+                    image_rotary_emb,
+                    clip_encoder_hidden_states,
+                    clip_attention_mask,
+                )
+                if noise_pred.size()[1] != vae.config.latent_channels:
+                    noise_pred, _ = noise_pred.chunk(2, dim=1)
+
+                def diffusion_mse_loss(noise_pred, target, threshold=50):
+                    noise_pred = noise_pred.float()
+                    target = target.float()
+                    diff = noise_pred - target
+                    mse_loss = F.mse_loss(noise_pred, target, reduction='none')
+                    mask = (diff.abs() <= threshold).float()
+                    masked_loss = mse_loss * mask
+                    final_loss = masked_loss.mean()
+                    return final_loss
+
+                def pixel_mse_loss(output_latents, target):
+                    mse_loss = F.mse_loss(output_latents.float(), target.float(), reduction='mean')
+                    if mse_loss >= 1.0:
+                        return 0.0
+                    else:
+                        return mse_loss
+
+                def match_loss_fn(warped_points, gt_points):
+                    return F.smooth_l1_loss(warped_points, gt_points, reduction='mean', beta=1.0)
+
+                diffusion_loss = diffusion_mse_loss(noise_pred.float(), target.float())
+
+                output_latents = []
+                batch_size = noise_pred.size(0)
+
+                for i in range(batch_size):
+                    # 提取单个样本的 noise_pred, timesteps, 和 noisy_latents
+                    single_noise_pred = noise_pred[i].unsqueeze(0)  # 形状: [1, 16, 7, 32, 32]
+                    single_timestep = timesteps[i].unsqueeze(0)  # 形状: [1]
+                    single_noisy_latents = noisy_latents[i].unsqueeze(0)  # 形状: [1, 16, 7, 32, 32]
+
+                    # 调用 step 方法
+                    step_output = noise_scheduler.step(single_noise_pred, single_timestep, single_noisy_latents).pred_original_sample
+
+                    # 收集结果
+                    output_latents.append(step_output)
+
+                # 将结果堆叠回批次形式
+                output_latents = torch.cat(output_latents, dim=0)  # 形状: [2, 16, 7, 32, 32]
+
+                pixel_loss = pixel_mse_loss(output_latents, gt_latents)
+
+                warped_points, gt_points = get_match_points_from_dust3r(pixel_values, mask_pixel_values, mask)
+                match_loss = match_loss_fn(warped_points, gt_points)
+
+                loss = (
+                    config['loss_weights']['lambda_diffusion'] * diffusion_loss
+                    + config['loss_weights']['lambda_pixel'] * pixel_loss
+                    + config['loss_weights']['lambda_match'] * match_loss
+                )
+
+                # def my_mse_loss(output_latents, target):
+                #     mse_loss = F.mse_loss(output_latents.float(), target.float(), reduction='mean')
+                #     if mse_loss >= 1.0:
+                #         return 0.0
+                #     else:
+                #         return mse_loss
+
+                # output_latents = noise_scheduler.step(noise_pred, timesteps, noisy_latents).pred_original_sample
+                # output_latents = []
+                # batch_size = noise_pred.size(0)
+
+                # for i in range(batch_size):
+                #     # 提取单个样本的 noise_pred, timesteps, 和 noisy_latents
+                #     single_noise_pred = noise_pred[i].unsqueeze(0)  # 形状: [1, 16, 7, 32, 32]
+                #     single_timestep = timesteps[i].unsqueeze(0)  # 形状: [1]
+                #     single_noisy_latents = noisy_latents[i].unsqueeze(0)  # 形状: [1, 16, 7, 32, 32]
+
+                #     # 调用 step 方法
+                #     step_output = noise_scheduler.step(single_noise_pred, single_timestep, single_noisy_latents).pred_original_sample
+
+                #     # 收集结果
+                #     output_latents.append(step_output.pred_original_sample)
+
+                # # 将结果堆叠回批次形式
+                # output_latents = torch.cat(output_latents, dim=0)  # 形状: [2, 16, 7, 32, 32]
+
+                # loss = my_mse_loss(output_latents, gt_latents)
+
+                # if accelerator.is_main_process:
+                #     if global_step % (len(train_dataloader) - 1) == 0 or global_step == 0:
+                #         with torch.no_grad():
+                #             video_predict_output = decode_latents(output_latents.to(weight_dtype), vae)
+                #             video_predict_output = torch.from_numpy(video_predict_output)
+                #             video_target = decode_latents(gt_latents, vae)
+                #             video_target = torch.from_numpy(video_target)
+                #             save_videos_grid(video_predict_output, os.path.join(args.output_dir, f"sample/sample-{global_step}-video_predict_output.gif"))
+                #             save_videos_grid(video_target, os.path.join(args.output_dir, f"sample/sample-{global_step}-video_target.gif"))
+
+                # if args.motion_sub_loss and noise_pred.size()[2] > 2:
+                #     gt_sub_noise = noise_pred[:, :, 1:].float() - noise_pred[:, :, :-1].float()
+                #     pre_sub_noise = target[:, :, 1:].float() - target[:, :, :-1].float()
+                #     sub_loss = F.mse_loss(gt_sub_noise, pre_sub_noise, reduction="mean")
+                #     loss = loss * (1 - args.motion_sub_loss_ratio) + sub_loss * args.motion_sub_loss_ratio
+                # else:
+                #     added_cond_kwargs = {"resolution": None, "aspect_ratio": None}
+                #     if unwrap_model(transformer3d).config.sample_size == 128:
+                #         bs, height, width = bsz, batch["pixel_values"].size()[-2], batch["pixel_values"].size()[-1]
+                #         resolution = torch.tensor([height, width]).repeat(bs, 1)
+                #         aspect_ratio = torch.tensor([float(height / width)]).repeat(bs, 1)
+                #         resolution = resolution.to(accelerator.device, dtype=weight_dtype)
+                #         aspect_ratio = aspect_ratio.to(accelerator.device, dtype=weight_dtype)
+                #         added_cond_kwargs = {"resolution": resolution, "aspect_ratio": aspect_ratio}
+
+                #     loss_term = train_diffusion.training_losses(
+                #         transformer3d,
+                #         latents,
+                #         timesteps,
+                #         noise=noise,
+                #         model_kwargs=dict(
+                #             encoder_hidden_states=prompt_embeds,
+                #             encoder_attention_mask=prompt_attention_mask,
+                #             added_cond_kwargs=added_cond_kwargs,
+                #             inpaint_latents=inpaint_latents if args.train_mode != "normal" else None,
+                #             clip_encoder_hidden_states=clip_encoder_hidden_states if args.train_mode != "normal" else None,
+                #             clip_attention_mask=clip_attention_mask if args.train_mode != "normal" else None,
+                #             return_dict=False,
+                #         ),
+                #     )
+                #     loss = loss_term['loss'].mean()
 
                 # Gather the losses across all processes for logging (if we use distributed training).
                 avg_loss = accelerator.gather(loss.repeat(args.train_batch_size)).mean()
@@ -1891,7 +1748,7 @@ def main():
 
                     if not args.use_deepspeed and args.report_model_info and accelerator.is_main_process:
                         if trainable_params_total_norm > 1 and global_step > args.abnormal_norm_clip_start:
-                            for name, param in transformer3d.named_parameters():
+                            for name, param in easycamera.named_parameters():
                                 if param.requires_grad:
                                     writer.add_scalar(f'gradients/before_clip_norm/{name}', param.grad.norm(), global_step=global_step)
 
@@ -1906,8 +1763,8 @@ def main():
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
 
-                if args.use_ema:
-                    ema_transformer3d.step(transformer3d.parameters())
+                # if args.use_ema:
+                #     ema_transformer3d.step(transformer3d.parameters())
                 progress_bar.update(1)
                 global_step += 1
                 accelerator.log({"train_loss": train_loss}, step=global_step)
@@ -1937,30 +1794,30 @@ def main():
                         accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
 
-                if accelerator.is_main_process:
-                    if args.validation_prompts is not None and global_step % args.validation_steps == 0:
-                        if args.use_ema:
-                            # Store the UNet parameters temporarily and load the EMA parameters to perform inference.
-                            ema_transformer3d.store(transformer3d.parameters())
-                            ema_transformer3d.copy_to(transformer3d.parameters())
-                        log_validation(
-                            vae,
-                            text_encoder,
-                            text_encoder_2,
-                            tokenizer,
-                            tokenizer_2,
-                            transformer3d,
-                            image_encoder,
-                            image_processor,
-                            config,
-                            args,
-                            accelerator,
-                            weight_dtype,
-                            global_step,
-                        )
-                        if args.use_ema:
-                            # Switch back to the original transformer3d parameters.
-                            ema_transformer3d.restore(transformer3d.parameters())
+                # if accelerator.is_main_process:
+                # if args.validation_prompts is not None and global_step % args.validation_steps == 0:
+                #     if args.use_ema:
+                #         # Store the UNet parameters temporarily and load the EMA parameters to perform inference.
+                #         ema_transformer3d.store(transformer3d.parameters())
+                #         ema_transformer3d.copy_to(transformer3d.parameters())
+                #     log_validation(
+                #         vae,
+                #         text_encoder,
+                #         text_encoder_2,
+                #         tokenizer,
+                #         tokenizer_2,
+                #         transformer3d,
+                #         image_encoder,
+                #         image_processor,
+                #         config,
+                #         args,
+                #         accelerator,
+                #         weight_dtype,
+                #         global_step,
+                #     )
+                #     if args.use_ema:
+                #         # Switch back to the original transformer3d parameters.
+                #         ema_transformer3d.restore(transformer3d.parameters())
 
             logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
@@ -1968,37 +1825,37 @@ def main():
             if global_step >= args.max_train_steps:
                 break
 
-        if accelerator.is_main_process:
-            if args.validation_prompts is not None and epoch % args.validation_epochs == 0:
-                if args.use_ema:
-                    # Store the UNet parameters temporarily and load the EMA parameters to perform inference.
-                    ema_transformer3d.store(transformer3d.parameters())
-                    ema_transformer3d.copy_to(transformer3d.parameters())
-                log_validation(
-                    vae,
-                    text_encoder,
-                    text_encoder_2,
-                    tokenizer,
-                    tokenizer_2,
-                    transformer3d,
-                    image_encoder,
-                    image_processor,
-                    config,
-                    args,
-                    accelerator,
-                    weight_dtype,
-                    global_step,
-                )
-                if args.use_ema:
-                    # Switch back to the original transformer3d parameters.
-                    ema_transformer3d.restore(transformer3d.parameters())
+        # if accelerator.is_main_process:
+        #     if args.validation_prompts is not None and epoch % args.validation_epochs == 0:
+        #         if args.use_ema:
+        #             # Store the UNet parameters temporarily and load the EMA parameters to perform inference.
+        #             ema_transformer3d.store(transformer3d.parameters())
+        #             ema_transformer3d.copy_to(transformer3d.parameters())
+        #         log_validation(
+        #             vae,
+        #             text_encoder,
+        #             text_encoder_2,
+        #             tokenizer,
+        #             tokenizer_2,
+        #             transformer3d,
+        #             image_encoder,
+        #             image_processor,
+        #             config,
+        #             args,
+        #             accelerator,
+        #             weight_dtype,
+        #             global_step,
+        #         )
+        #         if args.use_ema:
+        #             # Switch back to the original transformer3d parameters.
+        #             ema_transformer3d.restore(transformer3d.parameters())
 
     # Create the pipeline using the trained modules and save it.
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         transformer3d = unwrap_model(transformer3d)
-        if args.use_ema:
-            ema_transformer3d.copy_to(transformer3d.parameters())
+        # if args.use_ema:
+        #     ema_transformer3d.copy_to(transformer3d.parameters())
 
         if args.use_deepspeed or accelerator.is_main_process:
             save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")

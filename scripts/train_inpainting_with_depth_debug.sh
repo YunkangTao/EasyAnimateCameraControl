@@ -3,7 +3,7 @@ export DATASET_NAME="/mnt/chenyang_lei/Datasets/easyanimate_dataset"
 export DATASET_META_NAME="/mnt/chenyang_lei/Datasets/easyanimate_dataset/realestate_dataset/metadata.json"
 export NCCL_IB_DISABLE=1
 export NCCL_P2P_DISABLE=1
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 NCCL_DEBUG=INFO
 
@@ -41,4 +41,4 @@ accelerate launch \
   --uniform_sampling \
   --use_deepspeed \
   --train_mode="inpaint" \
-  --trainable_modules "."
+  --trainable_modules "attn1." "depth_head."

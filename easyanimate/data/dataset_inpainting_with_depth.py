@@ -476,7 +476,7 @@ class VideoDatasetWithDepth(Dataset):
             if random.random() < self.text_drop_ratio:
                 text = ''
 
-        camera_poses = [camera_poses[i] for i in batch_index]
+        camera_poses = torch.tensor([camera_poses[i] for i in batch_index])
 
         return pixel_values, camera_poses, text, data_type, ori_h, ori_w
 
@@ -546,7 +546,7 @@ if __name__ == "__main__":
 
     # DataLoaders creation:
     batch_sampler_generator = torch.Generator().manual_seed(42)
-    batch_sampler = VideoSamplerWithDepth(RandomSampler(train_dataset, generator=batch_sampler_generator), train_dataset, 1)
+    batch_sampler = VideoSamplerWithDepth(RandomSampler(train_dataset, generator=batch_sampler_generator), train_dataset, batch_size=2)
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         batch_sampler=batch_sampler,

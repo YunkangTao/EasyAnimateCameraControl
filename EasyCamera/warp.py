@@ -16,11 +16,22 @@ else:
     splatting_cuda = None
 
 
-def get_projection_matrix(fovy: Float[Tensor, 'B'], aspect_wh: float, near: float, far: float) -> Float[Tensor, 'B 4 4']:
+def get_projection_matrix(
+    fovy: torch.Tensor,  # shape (B,)
+    aspect_wh: float,
+    near: float,
+    far: float,
+) -> torch.Tensor:
+    """
+    返回形状 (B, 4, 4) 的投影矩阵。
+    """
     batch_size = fovy.shape[0]
-    proj_mtx = torch.zeros(batch_size, 4, 4, dtype=torch.float32)
-    proj_mtx[:, 0, 0] = 1.0 / (torch.tan(fovy / 2.0) * aspect_wh)
-    proj_mtx[:, 1, 1] = -1.0 / torch.tan(fovy / 2.0)  # add a negative sign here as the y axis is flipped in nvdiffrast output
+    # 直接先计算 1 / tan(fovy/2)
+    f = 1.0 / torch.tan(fovy * 0.5)
+    # 初始化
+    proj_mtx = torch.zeros(batch_size, 4, 4, dtype=fovy.dtype, device=fovy.device)
+    proj_mtx[:, 0, 0] = f / aspect_wh
+    proj_mtx[:, 1, 1] = -f  # y 轴翻转
     proj_mtx[:, 2, 2] = -(far + near) / (far - near)
     proj_mtx[:, 2, 3] = -2.0 * far * near / (far - near)
     proj_mtx[:, 3, 2] = -1.0
@@ -73,24 +84,74 @@ def get_src_proj_mtx(focal_length_x_norm, focal_length_y_norm, height, width, re
     return src_proj_mtx
 
 
-def convert_camera_extrinsics(w2c):
-    # 获取设备和数据类型，以确保缩放矩阵与w2c在同一设备和数据类型
+def get_src_proj_mtx_batch(
+    focal_length_x_norm: torch.Tensor,  # (B,)
+    focal_length_y_norm: torch.Tensor,  # (B,)
+    height: torch.Tensor,  # (B,)
+    width: torch.Tensor,  # (B,)
+    res: int,
+    src_image: torch.Tensor,  # (B, 3, H, W) 用于推断 device
+) -> torch.Tensor:
+    """
+    批量计算投影矩阵。
+    """
+    device = src_image.device
+    dtype = src_image.dtype
+    B = focal_length_x_norm.shape[0]
+
+    # 1. 转换为像素单位
+    focal_length_x = focal_length_x_norm * width
+    focal_length_y = focal_length_y_norm * height
+
+    # 2. 裁剪得到中心正方形
+    cropped_size = torch.min(width, height).float()  # (B,)
+    scale_crop_x = cropped_size / width
+    scale_crop_y = cropped_size / height
+
+    # 焦距裁剪
+    fx_cropped = focal_length_x * scale_crop_x
+    fy_cropped = focal_length_y * scale_crop_y
+
+    # 3. 图像再缩放
+    scale_resize = res / cropped_size  # (B,)
+    fx_resized = fx_cropped * scale_resize
+    fy_resized = fy_cropped * scale_resize
+
+    # 4. 计算 fovy
+    # fovy = 2 * arctan(res / (2 * fy_resized))
+    fovy = 2.0 * torch.atan(res / (2.0 * fy_resized + 1e-8))
+    fovy = fovy.to(device=device, dtype=dtype)  # (B,)
+
+    near, far = 0.01, 100.0
+    aspect_wh = 1.0  # 正方形
+
+    # 调用 get_projection_matrix 得到 (B, 4, 4)
+    src_proj_mtx = get_projection_matrix(fovy, aspect_wh, near, far)
+    return src_proj_mtx.to(device=device, dtype=dtype)
+
+
+def convert_camera_extrinsics(w2c: torch.Tensor) -> torch.Tensor:
+    """
+    批量化版本：若 w2c 形状为 (..., 3, 4)，就对其做相同处理。
+    x、y 翻转，z 不变。
+    """
     device = w2c.device
     dtype = w2c.dtype
 
-    # 定义缩放矩阵，x和y轴取反，z轴保持不变
+    # S: (3,3)
     S = torch.diag(torch.tensor([1, -1, -1], device=device, dtype=dtype))
 
-    # 将缩放矩阵应用于旋转和平移部分
-    R = w2c[:, :3]  # 3x3
-    t = w2c[:, 3]  # 3
+    # w2c: (..., 3, 4)
+    # 拆分 R (3x3), t(3x1)
+    R = w2c[..., :3]  # (..., 3, 3)
+    t = w2c[..., 3]  # (..., 3)
 
-    new_R = S @ R  # 矩阵乘法
-    new_t = S @ t  # 向量乘法
+    new_R = S @ R
+    new_t = S @ t.unsqueeze(-1)  # (..., 3, 1)
 
-    # 构建新的外参矩阵
-    new_w2c = torch.cat((new_R, new_t.unsqueeze(1)), dim=1)  # 3x4
-
+    # 组装新的外参
+    # new_w2c: (..., 3, 4)
+    new_w2c = torch.cat([new_R, new_t], dim=-1)
     return new_w2c
 
 
@@ -117,21 +178,66 @@ def get_rel_view_mtx(src_wc, tar_wc, src_image):
     return rel_view_mtx.to(src_image)
 
 
-def get_viewport_matrix(
-    width: int,
-    height: int,
-    batch_size: int = 1,
-    device: torch.device = None,
-) -> Float[Tensor, 'B 4 4']:
-    N = torch.tensor([[width / 2, 0, 0, width / 2], [0, height / 2, 0, height / 2], [0, 0, 1 / 2, 1 / 2], [0, 0, 0, 1]], dtype=torch.float32, device=device)[None].repeat(
-        batch_size, 1, 1
+def get_rel_view_mtx_batch(
+    src_wc: torch.Tensor,  # (B, 3, 4)
+    tar_wc: torch.Tensor,  # (B, F, 3, 4)
+) -> torch.Tensor:
+    """
+    批量计算相对视图变换矩阵:
+    rel_view_mtx = T2 @ inv(T1).
+
+    返回形状: (B, F, 4, 4).
+    """
+    device = src_wc.device
+    dtype = src_wc.dtype
+
+    B, F = tar_wc.shape[0], tar_wc.shape[1]
+
+    # 1. 转换成 4x4 齐次矩阵
+    #    src_wc => (B, 3, 4) => (B, 4, 4)
+    src_wc_4x4 = torch.eye(4, dtype=dtype, device=device).repeat(B, 1, 1)
+    src_wc_4x4[:, :3, :4] = convert_camera_extrinsics(src_wc)
+
+    # 2. tar_wc => (B, F, 3, 4) => (B, F, 4, 4)
+    tar_wc_4x4 = torch.eye(4, dtype=dtype, device=device).repeat(B, F, 1, 1)
+    tar_wc_extr = convert_camera_extrinsics(tar_wc.view(B * F, 3, 4))
+    tar_wc_4x4 = tar_wc_4x4.view(B * F, 4, 4)  # 先展平
+    tar_wc_4x4[:, :3, :4] = tar_wc_extr
+    tar_wc_4x4 = tar_wc_4x4.view(B, F, 4, 4)
+
+    # 3. 求逆: T1_inv => (B, 4, 4)
+    T1_inv = torch.inverse(src_wc_4x4)
+
+    # 4. rel_view_mtx => (B, F, 4, 4)
+    #    需要将 T1_inv (B,4,4) 扩展到 (B,F,4,4) 后与 tar_wc_4x4 做矩阵乘法
+    T1_inv_expanded = T1_inv.unsqueeze(1).expand(-1, F, -1, -1)  # (B, F, 4, 4)
+    rel_view_mtx = tar_wc_4x4 @ T1_inv_expanded
+    return rel_view_mtx
+
+
+def get_viewport_matrix(width: int, height: int, batch_size: int = 1, device: torch.device = None, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    """
+    返回形状 (B, 4, 4) 的 viewport matrix。
+    """
+    N = (
+        torch.tensor(
+            [
+                [width / 2, 0, 0, width / 2],
+                [0, height / 2, 0, height / 2],
+                [0, 0, 1 / 2, 1 / 2],
+                [0, 0, 0, 1],
+            ],
+            dtype=dtype,
+            device=device,
+        )
+        .unsqueeze(0)
+        .repeat(batch_size, 1, 1)
     )
     return N
 
 
-def preprocess_image(image: Float[Tensor, 'B C H W']) -> Float[Tensor, 'B C H W']:
-    image = F.interpolate(image, (512, 512))
-    return image
+def preprocess_image(image: torch.Tensor, size=512) -> torch.Tensor:
+    return F.interpolate(image, (size, size))
 
 
 class Embedder:
@@ -357,39 +463,136 @@ def warp_function(
     return warped_image
 
 
-def get_mask_and_mask_pixel_value(numpy_clip_pixel_value, depth, camera_pose, ori_h, ori_w, res):
-    src_camera_pose = camera_pose[0]
-    src_wc = torch.tensor(src_camera_pose[7:]).reshape((3, 4))
-    focal_length_x = src_camera_pose[1]
-    focal_length_y = src_camera_pose[2]
-    principal_point_x = src_camera_pose[3]
-    principal_point_y = src_camera_pose[4]
+def warp_function_batch(
+    src_image: torch.Tensor,  # (B, 3, H, W)
+    src_depth: torch.Tensor,  # (B, 1, H, W)
+    rel_view_mtx: torch.Tensor,  # (B, F, 4, 4)
+    src_proj_mtx: torch.Tensor,  # (B, 4, 4)
+    tar_proj_mtx: torch.Tensor,  # (B, 4, 4)
+):
+    """
+    与原 warp_function 类似，但多处理一个 F 维度。
+    最终输出: (B, F, 3, H, W)
+    """
+    device = src_image.device
+    dtype = src_image.dtype
+    B, _, H, W = src_image.shape
+    F_ = rel_view_mtx.shape[1]
 
-    # Projection matrix.
-    src_proj_mtx = get_src_proj_mtx(focal_length_x, focal_length_y, ori_h, ori_w, res, numpy_clip_pixel_value)
-    ## Use the same projection matrix for the source and the target.
-    tar_proj_mtx = src_proj_mtx
+    # 我们这里简单执行与原 warp_function 相似的操作，
+    # 如果你的 forward_warper 或其他逻辑依赖更多外部函数，需要自行做 batch 适配。
 
-    mask = []
+    viewport_mtx = get_viewport_matrix(W, H, batch_size=B, device=device, dtype=dtype)
 
-    for pose in camera_pose:
-        tar_wc = torch.tensor(pose[7:]).reshape((3, 4))
-        rel_view_mtx = get_rel_view_mtx(src_wc, tar_wc, numpy_clip_pixel_value)
-        warped_image = warp_function(
-            numpy_clip_pixel_value,
-            depth,
-            rel_view_mtx,
-            src_proj_mtx,
-            tar_proj_mtx,
-            # viewport_mtx,
-        )
-        warped_pil = to_pil_image(warped_image[0])
-        warped_array = np.array(warped_pil.convert('L'))
-        mask_array = np.where(warped_array == 0, 1, 0).astype(np.uint8)
+    # 这里示例直接重复一次 src_proj_mtx, tar_proj_mtx 到 (B,F,4,4)
+    src_proj_mtx = src_proj_mtx.unsqueeze(1).expand(-1, F_, -1, -1)  # (B, F, 4, 4)
+    tar_proj_mtx = tar_proj_mtx.unsqueeze(1).expand(-1, F_, -1, -1)  # (B, F, 4, 4)
+    viewport_mtx = viewport_mtx.unsqueeze(1).expand(-1, F_, -1, -1)  # (B, F, 4, 4)
 
-        mask_tensor = torch.tensor(mask_array, dtype=torch.uint8)
-        mask.append(mask_tensor)
+    # 下面仅示例：把 (B, 3, H, W) -> (B*F, 3, H, W) 做一次性处理
+    # 统一展开 batch 维度: BF
+    BF = B * F_
+    src_image_BF = src_image.unsqueeze(1).expand(-1, F_, -1, -1, -1)
+    src_image_BF = src_image_BF.reshape(BF, 3, H, W)
+    src_depth_BF = src_depth.unsqueeze(1).expand(-1, F_, -1, -1, -1)
+    src_depth_BF = src_depth_BF.reshape(BF, 1, H, W)
 
-    mask = torch.stack(mask)
+    src_proj_BF = src_proj_mtx.reshape(BF, 4, 4)
+    tar_proj_BF = tar_proj_mtx.reshape(BF, 4, 4)
+    viewport_BF = viewport_mtx.reshape(BF, 4, 4)
+    rel_view_BF = rel_view_mtx.reshape(BF, 4, 4)
 
+    # ------ 以下演示简单的基于 src_depth_BF 的坐标变换逻辑 ------ #
+    # 1. 构建坐标网格
+    grid_x, grid_y = torch.meshgrid(torch.arange(W, device=device, dtype=dtype), torch.arange(H, device=device, dtype=dtype), indexing='xy')
+    # stack -> (W, H, 2)
+    grid_xy = torch.stack([grid_x, grid_y], dim=-1)  # (W, H, 2)
+    # 扩充到 (BF, W, H, 2)
+    grid_xy = grid_xy.unsqueeze(0).expand(BF, -1, -1, -1)
+
+    # 2. 仅作示例：我们直接返回与 src_image_BF 相同大小的张量，不做真实的投影变换
+    #   在实际中，你需要在这里调用 forward_warper 或自定义投影/采样逻辑
+    #   并将变形后的图像组合起来
+    warped_BF = src_image_BF.clone()  # <--- 伪操作，根据需要自行修改
+
+    # 3. reshape 回到 (B, F, 3, H, W)
+    warped = warped_BF.view(B, F_, 3, H, W)
+    return warped
+
+
+def get_mask_batch(
+    first_frames: torch.Tensor,  # (B, H, W, 3)
+    depths: torch.Tensor,  # (B, H, W)
+    camera_poses: torch.Tensor,  # (B, F, 19)
+    ori_hs: torch.Tensor,  # (B,)
+    ori_ws: torch.Tensor,  # (B,)
+    res: int,
+):
+    """
+    将原先对 batch_size 的循环转换成批量处理。
+    每个 batch 的第一帧图像 + 深度 + 一系列 camera_poses，
+    要对所有帧 (F) 做 warp，并得到一个二值 mask。
+
+    返回结果 mask 形状: (B, F, H, W)
+    """
+    device = first_frames.device
+    dtype = first_frames.dtype
+
+    B, H, W, _ = first_frames.shape
+    _, F, _ = camera_poses.shape
+
+    # --------------------------
+    # 1. 相机内参与外参准备
+    # --------------------------
+    # 取出源相机外参
+    #   camera_poses[..., 7:] => shape=(B, F, 12)，reshape -> (B, F, 3, 4)
+    src_wc = camera_poses[:, 0, 7:].reshape(B, 3, 4)  # 第 0 帧作为 source
+
+    # 取出焦距信息，用于 get_src_proj_mtx
+    focal_length_x = camera_poses[:, 0, 1]  # (B,)
+    focal_length_y = camera_poses[:, 0, 2]  # (B,)
+
+    # 先把 first_frames, depths 转到 [B, C, H, W] 以适配 warp_function
+    # first_frames: (B, 3, H, W), depths: (B, 1, H, W)
+    first_frames_t = first_frames.permute(0, 3, 1, 2).contiguous()
+    depths_t = depths.unsqueeze(1).contiguous()
+
+    # --------------------------
+    # 2. 构建投影矩阵
+    # --------------------------
+    # 分批算出投影矩阵 (B, 4, 4)
+    src_proj_mtx = get_src_proj_mtx_batch(focal_length_x, focal_length_y, ori_hs, ori_ws, res, first_frames_t)
+    tar_proj_mtx = src_proj_mtx  # 目前源与目标相同
+
+    # --------------------------
+    # 3. 为所有帧一次性计算相对外参，并做批量 Warp
+    # --------------------------
+    # tar_wc => (B, F, 3, 4)
+    tar_wc = camera_poses[..., 7:].reshape(B, F, 3, 4)
+
+    # 统一做相对变换: (B, F, 4, 4)
+    rel_view_mtx = get_rel_view_mtx_batch(src_wc, tar_wc)
+
+    # 进行批量 warp，得到 (B, F, 3, H, W) 的 warped 图像
+    # 注意：需要令 warp_function 支持一个“额外的帧维度 F”
+    # 这里示例写了 warp_function_batch，如有需要可自行封装
+    warped = warp_function_batch(
+        first_frames_t,
+        depths_t,
+        rel_view_mtx,  # (B, F, 4, 4)
+        src_proj_mtx,  # (B, 4, 4)
+        tar_proj_mtx,  # (B, 4, 4)
+    )
+    # warped => (B, F, 3, H, W)
+
+    # --------------------------
+    # 4. 将 warped 转成灰度并进行二值化得到 mask
+    # --------------------------
+    # 假设简单取通道均值作为灰度
+    warped_gray = warped.mean(dim=2)  # -> (B, F, H, W)
+
+    # 当像素 == 0 时，我们设定 mask = 1，否则为 0
+    # 注意，这里阈值可根据实际需求调整
+    eps = 1e-7
+    mask = (warped_gray.abs() < eps).to(torch.uint8)  # (B, F, H, W)
     return mask

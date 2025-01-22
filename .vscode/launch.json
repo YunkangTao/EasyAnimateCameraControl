@@ -15,7 +15,7 @@
             "pathMappings": [
                 {
                     "localRoot": "${workspaceFolder}",
-                    "remoteRoot": "/home/yunkang/EasyAnimateCameraControl"
+                    "remoteRoot": "/home/chenyang_lei/video_diffusion_models/EasyAnimateCameraControl"
                 }
             ]
         },
