@@ -112,6 +112,7 @@ from easyanimate.utils.respace import SpacedDiffusion, space_timesteps
 from easyanimate.utils.utils import get_image_to_video_latent, save_videos_grid
 from EasyCamera.match import get_match_points_from_dust3r
 from EasyCamera.model import EasyCamera
+from EasyCamera.tools import save_videos_set
 
 if is_wandb_available():
     import wandb
@@ -1579,7 +1580,7 @@ def main():
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
                 # Predict the noise residual
-                noise_pred, mask_pixel_values, mask = easycamera(
+                noise_pred, first_frames, depths, mask, warped, mask_pixel_values, pixel_values = easycamera(
                     first_frames,
                     camera_poses,
                     ori_hs,
@@ -1604,6 +1605,9 @@ def main():
                     clip_encoder_hidden_states,
                     clip_attention_mask,
                 )
+                if epoch == first_epoch and step == 0:
+                    save_videos_set(first_frames, depths, mask, warped, mask_pixel_values, pixel_values, os.path.join(args.output_dir, f"sanity_check-{global_step}"))
+
                 if noise_pred.size()[1] != vae.config.latent_channels:
                     noise_pred, _ = noise_pred.chunk(2, dim=1)
 

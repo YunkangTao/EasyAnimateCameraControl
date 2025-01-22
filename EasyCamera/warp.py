@@ -595,4 +595,4 @@ def get_mask_batch(
     # 注意，这里阈值可根据实际需求调整
     eps = 1e-7
     mask = (warped_gray.abs() < eps).to(torch.uint8)  # (B, F, H, W)
-    return mask
+    return mask, warped
