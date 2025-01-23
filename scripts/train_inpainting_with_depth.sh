@@ -1,6 +1,6 @@
 export MODEL_NAME="models/Diffusion_Transformer/EasyAnimateV5-7b-zh-InP"
-export DATASET_NAME="/mnt/chenyang_lei/Datasets/easyanimate_dataset/z_datasets_warped_videos_2_3"
-export DATASET_META_NAME="/mnt/chenyang_lei/Datasets/easyanimate_dataset/z_datasets_warped_videos_2_3/metadata.json"
+export DATASET_NAME="/mnt/chenyang_lei/Datasets/easyanimate_dataset"
+export DATASET_META_NAME="/mnt/chenyang_lei/Datasets/easyanimate_dataset/realestate_dataset/metadata.json"
 export NCCL_IB_DISABLE=1
 export NCCL_P2P_DISABLE=1
 export CUDA_VISIBLE_DEVICES=0,1,2,3
@@ -13,7 +13,7 @@ accelerate launch \
   --deepspeed_config_file config/zero_stage2_config.json \
   --deepspeed_multinode_launcher standard \
   --main_process_port 29501 \
-  scripts/train_inpainting_with_mask.py \
+  scripts/train_inpainting_with_depth.py \
   --pretrained_model_name_or_path=$MODEL_NAME \
   --train_data_dir=$DATASET_NAME \
   --train_data_meta=$DATASET_META_NAME \
@@ -30,7 +30,7 @@ accelerate launch \
   --lr_scheduler="constant_with_warmup" \
   --lr_warmup_steps=100 \
   --seed=42 \
-  --output_dir="output_dir_20250114_inpainting_with_mask_all_realestate_attn1" \
+  --output_dir="output_dir_20250123_inpainting_with_depth_attn1_head" \
   --gradient_checkpointing \
   --mixed_precision="bf16" \
   --adam_weight_decay=5e-3 \
@@ -41,5 +41,4 @@ accelerate launch \
   --uniform_sampling \
   --use_deepspeed \
   --train_mode="inpaint" \
-  --trainable_modules "attn1." \
-  --resume_from_checkpoint="latest"
+  --trainable_modules "attn1." "depth_head."

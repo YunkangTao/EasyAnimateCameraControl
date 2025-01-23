@@ -464,60 +464,141 @@ def warp_function(
 
 
 def warp_function_batch(
-    src_image: torch.Tensor,  # (B, 3, H, W)
-    src_depth: torch.Tensor,  # (B, 1, H, W)
-    rel_view_mtx: torch.Tensor,  # (B, F, 4, 4)
-    src_proj_mtx: torch.Tensor,  # (B, 4, 4)
-    tar_proj_mtx: torch.Tensor,  # (B, 4, 4)
-):
+    src_image: Float[Tensor, 'B C H W'],
+    src_depth: Float[Tensor, 'B 1 H W'],
+    rel_view_mtx: Float[Tensor, 'B F 4 4'],  # (B, F, 4, 4)
+    src_proj_mtx: Float[Tensor, 'B 4 4'],  # (B, 4, 4)
+    tar_proj_mtx: Float[Tensor, 'B 4 4'],  # (B, 4, 4)
+    # 其余必要参数可酌情加
+) -> Float[Tensor, 'B F C H W']:
     """
-    与原 warp_function 类似，但多处理一个 F 维度。
-    最终输出: (B, F, 3, H, W)
+    批量的Warp函数，一次性处理 (B, F) 个相对视角变换。
+    最终输出形状为 (B, F, C, H, W)。
     """
+
     device = src_image.device
     dtype = src_image.dtype
-    B, _, H, W = src_image.shape
-    F_ = rel_view_mtx.shape[1]
 
-    # 我们这里简单执行与原 warp_function 相似的操作，
-    # 如果你的 forward_warper 或其他逻辑依赖更多外部函数，需要自行做 batch 适配。
+    # ========== 1) 预处理 ==========
+    # 这里沿用与 warp_function 相同的预处理思路
+    src_image = preprocess_image(src_image)  # (B, C, 512, 512)
+    src_depth = preprocess_image(src_depth)  # (B, 1, 512, 512)
 
-    viewport_mtx = get_viewport_matrix(W, H, batch_size=B, device=device, dtype=dtype)
+    B, C, H, W = src_image.shape
+    F_ = rel_view_mtx.shape[1]  # 视频帧数
 
-    # 这里示例直接重复一次 src_proj_mtx, tar_proj_mtx 到 (B,F,4,4)
-    src_proj_mtx = src_proj_mtx.unsqueeze(1).expand(-1, F_, -1, -1)  # (B, F, 4, 4)
-    tar_proj_mtx = tar_proj_mtx.unsqueeze(1).expand(-1, F_, -1, -1)  # (B, F, 4, 4)
+    # ========== 2) viewport_mtx ==========
+    # 在原 warp_function 中是 get_viewport_matrix(512, 512, batch_size=1,...)
+    # 这里要改为 batch_size=B，再加上F维度
+    viewport_mtx = get_viewport_matrix(width=512, height=512, batch_size=B, device=device).to(dtype)  # (B, 4, 4)
+    # 扩展到 (B, F, 4, 4)
     viewport_mtx = viewport_mtx.unsqueeze(1).expand(-1, F_, -1, -1)  # (B, F, 4, 4)
 
-    # 下面仅示例：把 (B, 3, H, W) -> (B*F, 3, H, W) 做一次性处理
-    # 统一展开 batch 维度: BF
+    # ========== 3) 构建 src_scr_mtx = viewport_mtx @ src_proj_mtx ==========
+    # 先把 src_proj_mtx 从 (B,4,4) 扩维到 (B,F,4,4)
+    src_proj_mtx = src_proj_mtx.unsqueeze(1).expand(-1, F_, -1, -1)  # (B, F, 4, 4)
+    src_scr_mtx = viewport_mtx @ src_proj_mtx  # (B, F, 4, 4)
+
+    # ========== 4) 构建 mvp_mtx = tar_proj_mtx @ rel_view_mtx ==========
+    tar_proj_mtx = tar_proj_mtx.unsqueeze(1).expand(-1, F_, -1, -1)  # (B, F, 4, 4)
+    mvp_mtx = tar_proj_mtx @ rel_view_mtx  # (B, F, 4, 4)
+
+    # ========== 5) 坐标网格与反投影 ==========
+    # 原 warp_function 做法：先在 (H, W) 构建 grid，再 pad => z=0, w=1
+    grid = torch.stack(torch.meshgrid(torch.arange(W, device=device, dtype=dtype), torch.arange(H, device=device, dtype=dtype), indexing='xy'), dim=-1)  # (W, H, 2)
+    # 变成 (H, W, 2)
+    grid = grid.permute(1, 0, 2).contiguous()  # (H, W, 2)
+
+    # 在原函数中：  screen => (B, H, W, 4)
+    screen = F.pad(grid, (0, 1), 'constant', 0)  # (H, W, 3), z=0
+    screen = F.pad(screen, (0, 1), 'constant', 1)  # (H, W, 4), w=1
+
+    # 此处需要在 batch(F) 维度上都同样的 screen，所以:
+    # 先扩展到 (B, F, H, W, 4)
+    screen = screen.unsqueeze(0).unsqueeze(1).expand(B, F_, H, W, 4)
+    # 再展平成 (B, F, H*W, 4)
+    screen_flat = rearrange(screen, 'b f h w c -> b f (h w) c')
+
+    # ========== 6) 计算 src_scr_mtx 的逆并反投影 (unproject) ==========
+    #   src_scr_mtx: (B, F, 4, 4)
+    #   我们需要逆矩阵：inv_scr_mtx => (B, F, 4, 4)
+    #   PyTorch 2.0+ 有 torch.linalg.inv_ex，可先 flatten 后再reshape
     BF = B * F_
-    src_image_BF = src_image.unsqueeze(1).expand(-1, F_, -1, -1, -1)
-    src_image_BF = src_image_BF.reshape(BF, 3, H, W)
-    src_depth_BF = src_depth.unsqueeze(1).expand(-1, F_, -1, -1, -1)
-    src_depth_BF = src_depth_BF.reshape(BF, 1, H, W)
+    src_scr_mtx_bf = rearrange(src_scr_mtx, 'b f h w -> (b f) h w')  # (BF, 4,4)
+    inv_scr_mtx_bf = torch.linalg.inv_ex(src_scr_mtx_bf.float())[0].to(dtype)
+    inv_scr_mtx = inv_scr_mtx_bf.view(B, F_, 4, 4)  # (B, F, 4, 4)
 
-    src_proj_BF = src_proj_mtx.reshape(BF, 4, 4)
-    tar_proj_BF = tar_proj_mtx.reshape(BF, 4, 4)
-    viewport_BF = viewport_mtx.reshape(BF, 4, 4)
-    rel_view_BF = rel_view_mtx.reshape(BF, 4, 4)
+    # 做矩阵乘法时，我们可以先把 screen_flat reshape => (BF, H*W, 4)
+    screen_flat_bf = rearrange(screen_flat, 'b f n c -> (b f) n c')  # (BF, H*W, 4)
+    # eye => (BF, H*W, 4)
+    eye_bf = screen_flat_bf @ inv_scr_mtx_bf.mT  # (BF, H*W, 4)
 
-    # ------ 以下演示简单的基于 src_depth_BF 的坐标变换逻辑 ------ #
-    # 1. 构建坐标网格
-    grid_x, grid_y = torch.meshgrid(torch.arange(W, device=device, dtype=dtype), torch.arange(H, device=device, dtype=dtype), indexing='xy')
-    # stack -> (W, H, 2)
-    grid_xy = torch.stack([grid_x, grid_y], dim=-1)  # (W, H, 2)
-    # 扩充到 (BF, W, H, 2)
-    grid_xy = grid_xy.unsqueeze(0).expand(BF, -1, -1, -1)
+    # ========== 7) 融合 depth (把 z 覆盖或相乘) ==========
+    # src_depth: (B, 1, H, W) => 同样扩展到 (B, F, H, W)
+    #   如果所有帧使用同样的深度(即相同相机), 也可以 repeat, 具体看需求
+    src_depth_f = src_depth.expand(B, F_, -1, -1)  # (B, F, H, W)
+    src_depth_f = src_depth_f.unsqueeze(2)
+    src_depth_f_bf = rearrange(src_depth_f, 'b f c h w -> (b f) (c) (h w)', c=1)
+    # => (BF, 1, H*W)
+    # 进一步恢复 => (BF, H*W, 1)
+    src_depth_f_bf = src_depth_f_bf.permute(0, 2, 1).contiguous()  # (BF, H*W, 1)
 
-    # 2. 仅作示例：我们直接返回与 src_image_BF 相同大小的张量，不做真实的投影变换
-    #   在实际中，你需要在这里调用 forward_warper 或自定义投影/采样逻辑
-    #   并将变形后的图像组合起来
-    warped_BF = src_image_BF.clone()  # <--- 伪操作，根据需要自行修改
+    # 替换 eye_bf[..., :1] => 只要 z
+    eye_bf = eye_bf * src_depth_f_bf
+    # w=1
+    eye_bf[..., 3] = 1
 
-    # 3. reshape 回到 (B, F, 3, H, W)
-    warped = warped_BF.view(B, F_, 3, H, W)
-    return warped
+    # ========== 8) 构建坐标嵌入 + 拼接到图像通道 ==========
+    # 这里与原函数类似： embedder(coords)
+    # coords 大小 (H, W, 2)，先 repeat 到 (B, F, H, W, 2)
+    # 并把结果 permute 成 (B, F, C_embed, H, W) => flatten => (BF, C_embed, H, W)
+    coords = torch.stack((grid[..., 0] / H, grid[..., 1] / W), dim=-1)  # (H, W, 2)
+    embedder = get_embedder(2)
+    embed_2d = embedder(coords)  # (H, W, C_embed)
+    # 扩展到 (B, F, H, W, C_embed)
+    embed_2d = embed_2d.unsqueeze(0).unsqueeze(0).expand(B, F_, H, W, -1)
+    # 变成 (B, F, C_embed, H, W)
+    embed_2d = embed_2d.permute(0, 1, 4, 2, 3).contiguous()
+    # 变成 (BF, C_embed, H, W)
+    embed_2d = rearrange(embed_2d, 'b f c h w -> (b f) c h w')
+
+    # 源图像也需要扩展到F维度 => (B, F, C, H, W) => (BF, C, H, W)
+    src_img_f = src_image.unsqueeze(1).expand(-1, F_, -1, -1, -1)  # (B, F, C, H, W)
+    src_img_f_bf = rearrange(src_img_f, 'b f c h w -> (b f) c h w')
+
+    # 拼接 => (BF, C_embed + C_src, H, W)
+    input_image_bf = torch.cat([embed_2d, src_img_f_bf], dim=1)
+
+    # ========== 9) 调用 forward_warper ==========
+    # forward_warper 需要的参数:
+    #   image: (BF, C, H, W)
+    #   screen: (BF, H*W, 2)
+    #   pcd: (BF, H*W, 4)
+    #   mvp_mtx: (BF, 4, 4)
+    #   viewport_mtx: (BF, 4, 4)
+    #
+    # 先 reshape mvp_mtx, viewport_mtx => (BF, 4,4)
+    mvp_mtx_bf = rearrange(mvp_mtx, 'b f h w -> (b f) h w')
+    viewport_mtx_bf = rearrange(viewport_mtx, 'b f h w -> (b f) h w')
+
+    # screen_flat_bf: (BF, H*W, 4) => forward_warper 只需要 [:, :, :2]
+    screen_2d_bf = screen_flat_bf[..., :2]  # (BF, H*W, 2)
+
+    # pcd => eye_bf => (BF, H*W, 4)
+    # 调用 forward_warper
+    output = forward_warper(image=input_image_bf, screen=screen_2d_bf, pcd=eye_bf, mvp_mtx=mvp_mtx_bf, viewport_mtx=viewport_mtx_bf, alpha=0.5)  # 或你使用的其它超参
+    warped_bf = output['warped']  # (BF, C_out, H, W)
+    # 其中 C_out = embed大小 + src_image 通道数；最后几通道才是图像
+
+    # ========== 10) 截取出 warped_image 部分 ==========
+    # 假设前 embed_2d.shape[1] 通道是 embed，那 warped_bf[:, embed_dim:] 便是图像
+    embed_dim = embed_2d.shape[1]
+    warped_image_bf = warped_bf[:, embed_dim:]  # (BF, C, H, W)
+
+    # ========== 11) reshape 回 (B, F, C, H, W) ==========
+    warped_image = rearrange(warped_image_bf, '(b f) c h w -> b f c h w', b=B, f=F_)
+
+    return warped_image
 
 
 def get_mask_batch(

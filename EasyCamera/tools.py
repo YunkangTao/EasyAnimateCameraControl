@@ -1,3 +1,4 @@
+import glob
 import os
 import cv2
 import torch
@@ -47,7 +48,7 @@ def save_videos_set(
     first_frames: torch.Tensor,  # [B, 512, 512, 3], 值域 [0,255]
     depths: torch.Tensor,  # [B, 512, 512], 值域 [0,80]
     mask: torch.Tensor,  # [B, 49, 512, 512], 值域 {0,1}
-    warped: torch.Tensor,  # [B, 49, 3, 512, 512], 值域 [0,255]
+    mask_warped: torch.Tensor,  # [B, 49, 3, 512, 512], 值域 [-1,1]
     mask_pixel_values: torch.Tensor,  # [B, 49, 3, 512, 512], 值域 [-1,1]
     pixel_values: torch.Tensor,  # [B, 49, 3, 512, 512], 值域 [-1,1]
     save_path: str,  # 存储视频的文件夹路径，输出视频会以下标自动命名
@@ -69,17 +70,21 @@ def save_videos_set(
 
     # 转成 numpy 并移动到 CPU 上（若已经在 CPU 则无需 .cpu()）
     first_frames_np = first_frames.cpu().numpy()
-    depths_np = depths.cpu().numpy()
+    depths_np = depths.detach().to(torch.float32).cpu().numpy()
     mask_np = mask.cpu().numpy()
-    warped_np = warped.cpu().numpy()
-    mask_pixel_values_np = mask_pixel_values.cpu().numpy()
-    pixel_values_np = pixel_values.cpu().numpy()
+    warped_np = mask_warped.detach().to(torch.float32).cpu().numpy()
+    mask_pixel_values_np = mask_pixel_values.to(torch.float32).cpu().numpy()
+    pixel_values_np = pixel_values.to(torch.float32).cpu().numpy()
 
     B = first_frames_np.shape[0]  # batch_size
     _, T, _, _ = mask_np.shape  # 这里假设 mask.shape = [B, 49, 512, 512] => T=49
 
+    # 获取当前目录中已经存在的以 "video_" 开头、".mp4" 结尾的文件数量
+    existing_files = glob.glob(os.path.join(save_path, "video_*.mp4"))
+    start_index = len(existing_files)  # 从已有文件数量继续往后编号
+
     # 视频写入相关设置
-    fps = 5
+    fps = 14
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 
     for i in range(B):
@@ -103,11 +108,11 @@ def save_videos_set(
         mask_array = np.stack([_to_3channels(x) for x in mask_i], axis=0)
         # shape: [T,512,512,3]
 
-        # (d) warped[i] -> shape [49,3,512,512], 值域 [0,255]
-        #     需转成 [T,512,512,3]
+        # (d) warped[i] -> shape [49,3,512,512], 值域 [-1,1]
+        #     先归一化到 [0,255], 再转 [T,512,512,3]
         warped_i = warped_np[i]  # [49,3,512,512]
+        warped_i = _normalize_img(warped_i, -1, 1)
         warped_i = np.transpose(warped_i, (0, 2, 3, 1))  # [T,512,512,3]
-        warped_i = warped_i.astype(np.uint8)  # [T,512,512,3]
 
         # (e) mask_pixel_values[i] -> shape [49,3,512,512], 值域 [-1,1]
         #     先归一化到 [0,255], 再转 [T,512,512,3]
@@ -124,7 +129,9 @@ def save_videos_set(
         #   单帧拼接后分辨率： 高度 = 2*512, 宽度 = 3*512
         out_h = 2 * 512
         out_w = 3 * 512
-        video_fn = os.path.join(save_path, f"video_{i}.mp4")
+
+        video_index = start_index + i
+        video_fn = os.path.join(save_path, f"video_{video_index}.mp4")
         out_writer = cv2.VideoWriter(video_fn, fourcc, fps, (out_w, out_h))
 
         # 3) 拼帧并写入视频
@@ -138,7 +145,7 @@ def save_videos_set(
 
             # 写入视频
             # 如果前面是 RGB 排列，需要将其转为 BGR
-            frame_bgr = frame[..., ::-1]
+            frame_bgr = frame[..., ::-1].astype(np.uint8)
             out_writer.write(frame_bgr)
 
         out_writer.release()

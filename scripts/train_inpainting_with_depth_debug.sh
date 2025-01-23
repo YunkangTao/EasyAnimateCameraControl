@@ -25,7 +25,7 @@ accelerate launch \
   --gradient_accumulation_steps=1 \
   --dataloader_num_workers=1 \
   --num_train_epochs=3 \
-  --checkpointing_steps=6778 \
+  --checkpointing_steps=1 \
   --learning_rate=2e-05 \
   --lr_scheduler="constant_with_warmup" \
   --lr_warmup_steps=100 \
@@ -41,4 +41,4 @@ accelerate launch \
   --uniform_sampling \
   --use_deepspeed \
   --train_mode="inpaint" \
-  --trainable_modules "attn1." "depth_head."
+  --trainable_modules "depth_head."

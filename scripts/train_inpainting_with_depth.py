@@ -110,7 +110,8 @@ from easyanimate.utils import gaussian_diffusion as gd
 from easyanimate.utils.discrete_sampler import DiscreteSampling
 from easyanimate.utils.respace import SpacedDiffusion, space_timesteps
 from easyanimate.utils.utils import get_image_to_video_latent, save_videos_grid
-from EasyCamera.match import get_match_points_from_dust3r
+
+# from EasyCamera.match import get_match_points_from_dust3r
 from EasyCamera.model import EasyCamera
 from EasyCamera.tools import save_videos_set
 
@@ -1580,7 +1581,7 @@ def main():
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
                 # Predict the noise residual
-                noise_pred, first_frames, depths, mask, warped, mask_pixel_values, pixel_values = easycamera(
+                noise_pred, first_frames, depths, mask, mask_warped, mask_pixel_values, pixel_values = easycamera(
                     first_frames,
                     camera_poses,
                     ori_hs,
@@ -1606,7 +1607,7 @@ def main():
                     clip_attention_mask,
                 )
                 if epoch == first_epoch and step == 0:
-                    save_videos_set(first_frames, depths, mask, warped, mask_pixel_values, pixel_values, os.path.join(args.output_dir, f"sanity_check-{global_step}"))
+                    save_videos_set(first_frames, depths, mask, mask_warped, mask_pixel_values, pixel_values, os.path.join(args.output_dir, f"sanity_check-{global_step}"))
 
                 if noise_pred.size()[1] != vae.config.latent_channels:
                     noise_pred, _ = noise_pred.chunk(2, dim=1)
@@ -1624,12 +1625,20 @@ def main():
                 def pixel_mse_loss(output_latents, target):
                     mse_loss = F.mse_loss(output_latents.float(), target.float(), reduction='mean')
                     if mse_loss >= 1.0:
-                        return 0.0
+                        torch.zeros(1, dtype=mse_loss.dtype, device=mse_loss.device)
                     else:
                         return mse_loss
 
-                def match_loss_fn(warped_points, gt_points):
+                def match_keypoints_loss_fn(warped_points, gt_points):
                     return F.smooth_l1_loss(warped_points, gt_points, reduction='mean', beta=1.0)
+
+                def match_pixel_loss_fn(mask_warped, mask_pixel_values):
+                    if mask_warped.size() != mask_pixel_values.size():
+                        raise ValueError("gen_video 和 gt_video 的形状必须一致。")
+
+                    # 直接使用 (gen_video - gt_video)**2 求平均
+                    # 或者也可以使用 torch.nn.functional.mse_loss(mask_warped, mask_pixel_values)
+                    return torch.nn.functional.mse_loss(mask_warped, mask_pixel_values)
 
                 diffusion_loss = diffusion_mse_loss(noise_pred.float(), target.float())
 
@@ -1653,8 +1662,9 @@ def main():
 
                 pixel_loss = pixel_mse_loss(output_latents, gt_latents)
 
-                warped_points, gt_points = get_match_points_from_dust3r(pixel_values, mask_pixel_values, mask)
-                match_loss = match_loss_fn(warped_points, gt_points)
+                # warped_points, gt_points = get_match_points_from_dust3r(pixel_values, mask_pixel_values, mask)
+                # match_loss = match_keypoints_loss_fn(warped_points, gt_points)
+                match_loss = match_pixel_loss_fn(mask_warped, mask_pixel_values)
 
                 loss = (
                     config['loss_weights']['lambda_diffusion'] * diffusion_loss

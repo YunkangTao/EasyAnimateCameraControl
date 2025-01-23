@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from EasyCamera.warp import get_mask_batch
 from einops import rearrange
+import torchvision.transforms as transforms
 
 
 def _batch_encode_vae(pixel_values, vae, vae_mini_batch, weight_dtype, video_length):
@@ -147,6 +148,20 @@ def get_inpaint_latents_from_depth(
     # 2. 生成 inpaint 像素：被 mask 的位置替换为 -1，其它使用原值
     mask_pixel_values = pixel_values * (1 - mask_for_pixel) + (-1) * mask_for_pixel
 
+    video_transforms = transforms.Compose(
+        [
+            transforms.Resize(video_sample_size),
+            transforms.CenterCrop((video_sample_size, video_sample_size)),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True),
+        ]
+    )
+
+    warped = warped / 255.0
+    warped = video_transforms(warped)
+
+    mask_warped = warped * (1 - mask_for_pixel) + (-1) * mask_for_pixel
+    mask_warped = mask_warped.to(accelerator_device, dtype=weight_dtype)
+
     # 3. 处理 t2v_flag 的逻辑
     # 原代码:
     #     t2v_flag = [(_mask == 1).all() for _mask in mask]
@@ -177,7 +192,7 @@ def get_inpaint_latents_from_depth(
     mask_reshape = resize_mask(mask_reshape, latents, vae.cache_mag_vae)
 
     # 5. 可选：对原视频添加噪声
-    mask_pixel_values_with_noise = add_noise_to_reference_video(mask_pixel_values)
+    mask_pixel_values_with_noise = add_noise_to_reference_video(mask_warped)
 
     # 6. 编码 inpaint latents：将 mask_pixel_values 传进 VAE 得到 mask_latents
     mask_latents = _batch_encode_vae(mask_pixel_values_with_noise, vae, vae_mini_batch, weight_dtype, video_length)
@@ -192,7 +207,7 @@ def get_inpaint_latents_from_depth(
     # 按照 VAE scaling_factor 进行缩放
     inpaint_latents = inpaint_latents * vae.config.scaling_factor
 
-    return inpaint_latents, mask_pixel_values, mask, warped
+    return inpaint_latents, mask_pixel_values, mask, mask_warped
 
 
 def pre_process_first_frames(first_frames, device, dtype, input_size=518):
@@ -256,7 +271,7 @@ class EasyCamera(nn.Module):
         depths = self.depth_anything_v2.forward(first_frames_processed)  # torch.Size([2, 518, 518])
         depths = F.interpolate(depths.unsqueeze(1), (h, w), mode="bilinear", align_corners=True).squeeze(1)  # torch.Size([2, 512, 512])
 
-        inpaint_latents, mask_pixel_values, mask, warped = get_inpaint_latents_from_depth(
+        inpaint_latents, mask_pixel_values, mask, mask_warped = get_inpaint_latents_from_depth(
             depths,
             first_frames,
             camera_poses,
@@ -272,23 +287,24 @@ class EasyCamera(nn.Module):
             video_length,
         )
 
-        # inpaint_latents = inpaint_latents.to(noisy_latents.dtype)
-        noise_pred = None
-        # noise_pred = self.easyanimate(
-        #     noisy_latents,
-        #     timesteps.to(noisy_latents.dtype),
-        #     encoder_hidden_states=prompt_embeds,
-        #     text_embedding_mask=prompt_attention_mask,
-        #     encoder_hidden_states_t5=prompt_embeds_2,
-        #     text_embedding_mask_t5=prompt_attention_mask_2,
-        #     image_meta_size=add_time_ids,
-        #     style=style,
-        #     image_rotary_emb=image_rotary_emb,
-        #     inpaint_latents=inpaint_latents,
-        #     clip_encoder_hidden_states=clip_encoder_hidden_states,
-        #     clip_attention_mask=clip_attention_mask,
-        #     return_dict=False,
-        # )[0]
+        del vae
+        torch.cuda.empty_cache()
 
-        # return noise_pred, mask_pixel_values, mask
-        return (noise_pred, first_frames, depths, mask, warped, mask_pixel_values, pixel_values)
+        inpaint_latents = inpaint_latents.to(noisy_latents.dtype)
+        noise_pred = self.easyanimate(
+            noisy_latents,
+            timesteps.to(noisy_latents.dtype),
+            encoder_hidden_states=prompt_embeds,
+            text_embedding_mask=prompt_attention_mask,
+            encoder_hidden_states_t5=prompt_embeds_2,
+            text_embedding_mask_t5=prompt_attention_mask_2,
+            image_meta_size=add_time_ids,
+            style=style,
+            image_rotary_emb=image_rotary_emb,
+            inpaint_latents=inpaint_latents,
+            clip_encoder_hidden_states=clip_encoder_hidden_states,
+            clip_attention_mask=clip_attention_mask,
+            return_dict=False,
+        )[0]
+
+        return (noise_pred, first_frames, depths, mask, mask_warped, mask_pixel_values, pixel_values)
