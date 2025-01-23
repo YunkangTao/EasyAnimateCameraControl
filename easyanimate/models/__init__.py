@@ -1,12 +1,5 @@
-from .autoencoder_magvit import AutoencoderKLCogVideoX, AutoencoderKLMagvit, AutoencoderKL
-from .transformer3d import (
-    EasyAnimateTransformer3DModel,
-    HunyuanTransformer3DModel,
-    Transformer3DModel,
-    EasyAnimateTransformer3DModelCameraControlV1,
-    EasyAnimateTransformer3DModelCameraControlV2,
-)
-
+from .autoencoder_magvit import AutoencoderKL, AutoencoderKLCogVideoX, AutoencoderKLMagvit
+from .transformer3d import EasyAnimateTransformer3DModel, HunyuanTransformer3DModel, Transformer3DModel
 
 name_to_transformer3d = {
     "Transformer3DModel": Transformer3DModel,

@@ -39,25 +39,10 @@ from diffusers.utils.torch_utils import maybe_allow_in_graph
 from einops import rearrange
 from torch import nn
 
-from .attention import (
-    EasyAnimateDiTBlock,
-    HunyuanDiTBlock,
-    SelfAttentionTemporalTransformerBlock,
-    TemporalTransformerBlock,
-    zero_module,
-)
-from .embeddings import (
-    HunyuanCombinedTimestepTextSizeStyleEmbedding,
-    TimePositionalEncoding,
-)
-from .norm import AdaLayerNormSingle
-from .patch import (
-    CasualPatchEmbed3D,
-    PatchEmbed3D,
-    PatchEmbedF3D,
-    TemporalUpsampler3D,
-    UnPatch1D,
-)
+from .attention import EasyAnimateDiTBlock, HunyuanDiTBlock, SelfAttentionTemporalTransformerBlock, TemporalTransformerBlock, zero_module
+from .embeddings import HunyuanCombinedTimestepTextSizeStyleEmbedding, TimePositionalEncoding
+from .norm import AdaLayerNormSingle, EasyAnimateRMSNorm
+from .patch import CasualPatchEmbed3D, PatchEmbed3D, PatchEmbedF3D, TemporalUpsampler3D, UnPatch1D
 from .resampler import Resampler
 
 try:
@@ -101,6 +86,41 @@ class Transformer3DModelOutput(BaseOutput):
     """
 
     sample: torch.FloatTensor
+
+
+class TeaCache:
+    """
+    Timestep Embedding Aware Cache, a training-free caching approach that estimates and leverages
+    the fluctuating differences among model outputs across timesteps, thereby accelerating the inference.
+    Please refer to:
+    1. https://github.com/ali-vilab/TeaCache.
+    2. Liu, Feng, et al. "Timestep Embedding Tells: It's Time to Cache for Video Diffusion Model." arXiv preprint arXiv:2411.19108 (2024).
+    """
+
+    def __init__(self, coefficients: list[float], num_steps: int, rel_l1_thresh: float = 0.0):
+        if num_steps < 1:
+            raise ValueError("`num_steps` must be greater than 0 but is {num_steps}.")
+        if rel_l1_thresh < 0:
+            raise ValueError("`rel_l1_thresh` must be greater than or equal to 0 but is {rel_l1_thresh}.")
+        self.coefficients = coefficients
+        self.cnt = 0
+        self.num_steps = num_steps
+        self.rel_l1_thresh = rel_l1_thresh
+        self.accumulated_rel_l1_distance = 0
+        self.previous_modulated_input = None
+        self.previous_residual = None
+        self.rescale_func = np.poly1d(self.coefficients)
+
+    @staticmethod
+    def compute_rel_l1_distance(prev, cur):
+        rel_l1_distance = (torch.abs(cur - prev).mean()) / torch.abs(prev).mean()
+
+        return rel_l1_distance.cpu().item()
+
+    def reset(self):
+        self.cnt = 0
+        self.previous_modulated_input = None
+        self.previous_residual = None
 
 
 class Transformer3DModel(ModelMixin, ConfigMixin):
@@ -159,6 +179,7 @@ class Transformer3DModel(ModelMixin, ConfigMixin):
         norm_eps: float = 1e-5,
         attention_type: str = "default",
         caption_channels: int = None,
+        n_query=8,
         # block type
         basic_block_type: str = "motionmodule",
         # enable_uvit
@@ -180,6 +201,8 @@ class Transformer3DModel(ModelMixin, ConfigMixin):
         after_norm=False,
         resize_inpaint_mask_directly: bool = False,
         enable_clip_in_inpaint: bool = True,
+        position_of_clip_embedding: str = "head",
+        enable_zero_in_inpaint: bool = False,
         enable_text_attention_mask: bool = True,
         add_noise_in_inpaint_model: bool = False,
     ):
@@ -204,6 +227,7 @@ class Transformer3DModel(ModelMixin, ConfigMixin):
         self.time_patch_size = self.patch_size if time_patch_size is None else time_patch_size
         interpolation_scale = self.config.sample_size // 64  # => 64 (= 512 pixart) has interpolation scale 1
         interpolation_scale = max(interpolation_scale, 1)
+        self.n_query = n_query
 
         if self.casual_3d:
             self.pos_embed = CasualPatchEmbed3D(
@@ -405,16 +429,22 @@ class Transformer3DModel(ModelMixin, ConfigMixin):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        timestep: Optional[torch.LongTensor] = None,
+        timestep_cond=None,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        text_embedding_mask: Optional[torch.Tensor] = None,
+        encoder_hidden_states_t5: Optional[torch.Tensor] = None,
+        text_embedding_mask_t5: Optional[torch.Tensor] = None,
+        image_meta_size=None,
+        style=None,
+        image_rotary_emb: Optional[torch.Tensor] = None,
         inpaint_latents: torch.Tensor = None,
         control_latents: torch.Tensor = None,
-        encoder_hidden_states: Optional[torch.Tensor] = None,
-        clip_encoder_hidden_states: Optional[torch.Tensor] = None,
-        timestep: Optional[torch.LongTensor] = None,
         added_cond_kwargs: Dict[str, torch.Tensor] = None,
         class_labels: Optional[torch.LongTensor] = None,
         cross_attention_kwargs: Dict[str, Any] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        encoder_attention_mask: Optional[torch.Tensor] = None,
+        clip_encoder_hidden_states: Optional[torch.Tensor] = None,
         clip_attention_mask: Optional[torch.Tensor] = None,
         return_dict: bool = True,
     ):
@@ -440,7 +470,7 @@ class Transformer3DModel(ModelMixin, ConfigMixin):
                 An attention mask of shape `(batch, key_tokens)` is applied to `encoder_hidden_states`. If `1` the mask
                 is kept, otherwise if `0` it is discarded. Mask will be converted into a bias, which adds large
                 negative values to the attention scores corresponding to "discard" tokens.
-            encoder_attention_mask ( `torch.Tensor`, *optional*):
+            text_embedding_mask ( `torch.Tensor`, *optional*):
                 Cross-attention mask applied to `encoder_hidden_states`. Two formats supported:
 
                     * Mask `(batch, sequence_length)` True = keep, False = discard.
@@ -474,11 +504,12 @@ class Transformer3DModel(ModelMixin, ConfigMixin):
             attention_mask = (1 - attention_mask.to(hidden_states.dtype)) * -10000.0
             attention_mask = attention_mask.unsqueeze(1)
 
+        text_embedding_mask = text_embedding_mask.squeeze(1)
         if clip_attention_mask is not None:
-            encoder_attention_mask = torch.cat([encoder_attention_mask, clip_attention_mask], dim=1)
+            text_embedding_mask = torch.cat([text_embedding_mask, clip_attention_mask], dim=1)
         # convert encoder_attention_mask to a bias the same way we do for attention_mask
-        if encoder_attention_mask is not None and encoder_attention_mask.ndim == 2:
-            encoder_attention_mask = (1 - encoder_attention_mask.to(encoder_hidden_states.dtype)) * -10000.0
+        if text_embedding_mask is not None and text_embedding_mask.ndim == 2:
+            encoder_attention_mask = (1 - text_embedding_mask.to(encoder_hidden_states.dtype)) * -10000.0
             encoder_attention_mask = encoder_attention_mask.unsqueeze(1)
 
         if inpaint_latents is not None:
@@ -540,7 +571,7 @@ class Transformer3DModel(ModelMixin, ConfigMixin):
                 video_length = (video_length - 1) * 2 + 1
                 hidden_states = rearrange(hidden_states, "b c f h w -> b (f h w) c", f=video_length, h=height, w=width)
 
-            if self.training and self.gradient_checkpointing:
+            if torch.is_grad_enabled() and self.gradient_checkpointing:
 
                 def create_custom_forward(module, return_dict=None):
                     def custom_forward(*inputs):
@@ -822,6 +853,7 @@ class HunyuanTransformer3DModel(ModelMixin, ConfigMixin):
         after_norm=False,
         resize_inpaint_mask_directly: bool = False,
         enable_clip_in_inpaint: bool = True,
+        position_of_clip_embedding: str = "full",
         enable_text_attention_mask: bool = True,
         add_noise_in_inpaint_model: bool = False,
     ):
@@ -958,6 +990,7 @@ class HunyuanTransformer3DModel(ModelMixin, ConfigMixin):
         control_latents: torch.Tensor = None,
         clip_encoder_hidden_states: Optional[torch.Tensor] = None,
         clip_attention_mask: Optional[torch.Tensor] = None,
+        added_cond_kwargs: Dict[str, torch.Tensor] = None,
         return_dict=True,
     ):
         """
@@ -1026,7 +1059,7 @@ class HunyuanTransformer3DModel(ModelMixin, ConfigMixin):
         for layer, block in enumerate(self.blocks):
             if layer > self.config.num_layers // 2:
                 skip = skips.pop()
-                if self.training and self.gradient_checkpointing:
+                if torch.is_grad_enabled() and self.gradient_checkpointing:
 
                     def create_custom_forward(module, return_dict=None):
                         def custom_forward(*inputs):
@@ -1063,7 +1096,7 @@ class HunyuanTransformer3DModel(ModelMixin, ConfigMixin):
                         hidden_states, temb=temb, encoder_hidden_states=encoder_hidden_states, image_rotary_emb=image_rotary_emb, skip=skip, **kwargs
                     )  # (N, L, D)
             else:
-                if self.training and self.gradient_checkpointing:
+                if torch.is_grad_enabled() and self.gradient_checkpointing:
 
                     def create_custom_forward(module, return_dict=None):
                         def custom_forward(*inputs):
@@ -1273,8 +1306,10 @@ class EasyAnimateTransformer3DModel(ModelMixin, ConfigMixin):
         freq_shift: int = 0,
         num_layers: int = 30,
         mmdit_layers: int = 10000,
+        swa_layers: list = None,
         dropout: float = 0.0,
         time_embed_dim: int = 512,
+        add_norm_text_encoder: bool = False,
         text_embed_dim: int = 4096,
         text_embed_dim_t5: int = 4096,
         norm_eps: float = 1e-5,
@@ -1284,8 +1319,10 @@ class EasyAnimateTransformer3DModel(ModelMixin, ConfigMixin):
         after_norm=False,
         resize_inpaint_mask_directly: bool = False,
         enable_clip_in_inpaint: bool = True,
+        position_of_clip_embedding: str = "full",
         enable_text_attention_mask: bool = True,
         add_noise_in_inpaint_model: bool = False,
+        add_ref_latent_in_control_model: bool = False,
     ):
         super().__init__()
         self.num_heads = num_attention_heads
@@ -1302,8 +1339,14 @@ class EasyAnimateTransformer3DModel(ModelMixin, ConfigMixin):
         self.time_embedding = TimestepEmbedding(self.inner_dim, time_embed_dim, timestep_activation_fn)
 
         self.proj = nn.Conv2d(in_channels, self.inner_dim, kernel_size=(patch_size, patch_size), stride=patch_size, bias=True)
-        self.text_proj = nn.Linear(text_embed_dim, self.inner_dim)
-        self.text_proj_t5 = nn.Linear(text_embed_dim_t5, self.inner_dim)
+        if not add_norm_text_encoder:
+            self.text_proj = nn.Linear(text_embed_dim, self.inner_dim)
+            if text_embed_dim_t5 is not None:
+                self.text_proj_t5 = nn.Linear(text_embed_dim_t5, self.inner_dim)
+        else:
+            self.text_proj = nn.Sequential(EasyAnimateRMSNorm(text_embed_dim), nn.Linear(text_embed_dim, self.inner_dim))
+            if text_embed_dim_t5 is not None:
+                self.text_proj_t5 = nn.Sequential(EasyAnimateRMSNorm(text_embed_dim), nn.Linear(text_embed_dim_t5, self.inner_dim))
 
         if ref_channels is not None:
             self.ref_proj = nn.Conv2d(ref_channels, self.inner_dim, kernel_size=(patch_size, patch_size), stride=patch_size, bias=True)
@@ -1314,23 +1357,44 @@ class EasyAnimateTransformer3DModel(ModelMixin, ConfigMixin):
         if clip_channels is not None:
             self.clip_proj = nn.Linear(clip_channels, self.inner_dim)
 
-        self.transformer_blocks = nn.ModuleList(
-            [
-                EasyAnimateDiTBlock(
-                    dim=self.inner_dim,
-                    num_attention_heads=num_attention_heads,
-                    attention_head_dim=attention_head_dim,
-                    time_embed_dim=time_embed_dim,
-                    dropout=dropout,
-                    activation_fn=activation_fn,
-                    norm_elementwise_affine=norm_elementwise_affine,
-                    norm_eps=norm_eps,
-                    after_norm=after_norm,
-                    is_mmdit_block=True if _ < mmdit_layers else False,
-                )
-                for _ in range(num_layers)
-            ]
-        )
+        self.swa_layers = swa_layers
+        if swa_layers is not None:
+            self.transformer_blocks = nn.ModuleList(
+                [
+                    EasyAnimateDiTBlock(
+                        dim=self.inner_dim,
+                        num_attention_heads=num_attention_heads,
+                        attention_head_dim=attention_head_dim,
+                        time_embed_dim=time_embed_dim,
+                        dropout=dropout,
+                        activation_fn=activation_fn,
+                        norm_elementwise_affine=norm_elementwise_affine,
+                        norm_eps=norm_eps,
+                        after_norm=after_norm,
+                        is_mmdit_block=True if index < mmdit_layers else False,
+                        is_swa=True if index in swa_layers else False,
+                    )
+                    for index in range(num_layers)
+                ]
+            )
+        else:
+            self.transformer_blocks = nn.ModuleList(
+                [
+                    EasyAnimateDiTBlock(
+                        dim=self.inner_dim,
+                        num_attention_heads=num_attention_heads,
+                        attention_head_dim=attention_head_dim,
+                        time_embed_dim=time_embed_dim,
+                        dropout=dropout,
+                        activation_fn=activation_fn,
+                        norm_elementwise_affine=norm_elementwise_affine,
+                        norm_eps=norm_eps,
+                        after_norm=after_norm,
+                        is_mmdit_block=True if _ < mmdit_layers else False,
+                    )
+                    for _ in range(num_layers)
+                ]
+            )
         self.norm_final = nn.LayerNorm(self.inner_dim, norm_eps, norm_elementwise_affine)
 
         # 5. Output blocks
@@ -1343,7 +1407,16 @@ class EasyAnimateTransformer3DModel(ModelMixin, ConfigMixin):
         )
         self.proj_out = nn.Linear(self.inner_dim, patch_size * patch_size * out_channels)
 
+        self.teacache = None
+
         self.gradient_checkpointing = False
+
+    def enable_teacache(self, num_steps: int, rel_l1_thresh: float, coefficients: list[float] = [-10.47857366, 8.33844143, -0.78477557, 0.68798618, 0.0136149]):
+        # The coefficient was obtained by sampling videos from T2V CompBench using EasyAnimateV5.1-12b-zh-InP.
+        # This coefficient can be applied to both the EasyAnimateV5.1-12b-zh and EasyAnimateV5.1-12b-Control.
+        # The coefficients for EasyAnimateV5.1-7b-zh-InP should be:
+        # [-3.64204720e+03, 1.43764725e+03, -1.93045263e+02, 1.09596499e+01, -1.70663507e-01]
+        self.teacache = TeaCache(coefficients, num_steps, rel_l1_thresh=rel_l1_thresh)
 
     def _set_gradient_checkpointing(self, module, value=False):
         self.gradient_checkpointing = value
@@ -1365,6 +1438,7 @@ class EasyAnimateTransformer3DModel(ModelMixin, ConfigMixin):
         ref_latents: Optional[torch.Tensor] = None,
         clip_encoder_hidden_states: Optional[torch.Tensor] = None,
         clip_attention_mask: Optional[torch.Tensor] = None,
+        added_cond_kwargs: Dict[str, torch.Tensor] = None,
         return_dict=True,
     ):
         batch_size, channels, video_length, height, width = hidden_states.size()
@@ -1412,42 +1486,123 @@ class EasyAnimateTransformer3DModel(ModelMixin, ConfigMixin):
 
             encoder_hidden_states = torch.concat([clip_encoder_hidden_states, ref_latents], dim=1)
 
-        # 4. Transformer blocks
-        for i, block in enumerate(self.transformer_blocks):
-            if self.training and self.gradient_checkpointing:
-
-                def create_custom_forward(module, return_dict=None):
-                    def custom_forward(*inputs):
-                        if return_dict is not None:
-                            return module(*inputs, return_dict=return_dict)
-                        else:
-                            return module(*inputs)
-
-                    return custom_forward
-
-                ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
-                hidden_states, encoder_hidden_states = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(block),
-                    hidden_states,
-                    encoder_hidden_states,
-                    temb,
-                    image_rotary_emb,
-                    **ckpt_kwargs,
-                )
+        # TeaCache
+        if self.teacache is not None:
+            inp = hidden_states.clone()
+            temb_ = temb.clone()
+            encoder_hidden_states_ = encoder_hidden_states.clone()
+            modulated_inp, _, _, _ = self.transformer_blocks[0].norm1(inp, encoder_hidden_states_, temb_)
+            if self.teacache.cnt == 0 or self.teacache.cnt == self.teacache.num_steps - 1:
+                should_calc = True
+                self.teacache.accumulated_rel_l1_distance = 0
             else:
-                hidden_states, encoder_hidden_states = block(
-                    hidden_states=hidden_states,
-                    encoder_hidden_states=encoder_hidden_states,
-                    temb=temb,
-                    image_rotary_emb=image_rotary_emb,
-                )
+                rel_l1_distance = self.teacache.compute_rel_l1_distance(self.teacache.previous_modulated_input, modulated_inp)
+                self.teacache.accumulated_rel_l1_distance += self.teacache.rescale_func(rel_l1_distance)
+                if self.teacache.accumulated_rel_l1_distance < self.teacache.rel_l1_thresh:
+                    should_calc = False
+                else:
+                    should_calc = True
+                    self.teacache.accumulated_rel_l1_distance = 0
+            self.teacache.previous_modulated_input = modulated_inp
+            self.teacache.cnt += 1
+            if self.teacache.cnt == self.teacache.num_steps:
+                # self.cnt = 0
+                self.teacache.reset()
 
-        hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
-        hidden_states = self.norm_final(hidden_states)
-        hidden_states = hidden_states[:, encoder_hidden_states.size()[1] :]
+        # TeaCache
+        if self.teacache is not None:
+            if not should_calc:
+                hidden_states += self.teacache.previous_residual
+            else:
+                ori_hidden_states = hidden_states.clone()
 
-        # 5. Final block
-        hidden_states = self.norm_out(hidden_states, temb=temb)
+                # 4. Transformer blocks
+                for i, block in enumerate(self.transformer_blocks):
+                    if torch.is_grad_enabled() and self.gradient_checkpointing:
+
+                        def create_custom_forward(module, return_dict=None):
+                            def custom_forward(*inputs):
+                                if return_dict is not None:
+                                    return module(*inputs, return_dict=return_dict)
+                                else:
+                                    return module(*inputs)
+
+                            return custom_forward
+
+                        ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
+                        hidden_states, encoder_hidden_states = torch.utils.checkpoint.checkpoint(
+                            create_custom_forward(block),
+                            hidden_states,
+                            encoder_hidden_states,
+                            temb,
+                            image_rotary_emb,
+                            video_length,
+                            height // self.patch_size,
+                            width // self.patch_size,
+                            **ckpt_kwargs,
+                        )
+                    else:
+                        hidden_states, encoder_hidden_states = block(
+                            hidden_states=hidden_states,
+                            encoder_hidden_states=encoder_hidden_states,
+                            temb=temb,
+                            image_rotary_emb=image_rotary_emb,
+                            num_frames=video_length,
+                            height=height // self.patch_size,
+                            width=width // self.patch_size,
+                        )
+
+                hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
+                hidden_states = self.norm_final(hidden_states)
+                hidden_states = hidden_states[:, encoder_hidden_states.size()[1] :]
+
+                # 5. Final block
+                hidden_states = self.norm_out(hidden_states, temb=temb)
+                self.teacache.previous_residual = hidden_states - ori_hidden_states
+        else:
+            # 4. Transformer blocks
+            for i, block in enumerate(self.transformer_blocks):
+                if torch.is_grad_enabled() and self.gradient_checkpointing:
+
+                    def create_custom_forward(module, return_dict=None):
+                        def custom_forward(*inputs):
+                            if return_dict is not None:
+                                return module(*inputs, return_dict=return_dict)
+                            else:
+                                return module(*inputs)
+
+                        return custom_forward
+
+                    ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
+                    hidden_states, encoder_hidden_states = torch.utils.checkpoint.checkpoint(
+                        create_custom_forward(block),
+                        hidden_states,
+                        encoder_hidden_states,
+                        temb,
+                        image_rotary_emb,
+                        video_length,
+                        height // self.patch_size,
+                        width // self.patch_size,
+                        **ckpt_kwargs,
+                    )
+                else:
+                    hidden_states, encoder_hidden_states = block(
+                        hidden_states=hidden_states,
+                        encoder_hidden_states=encoder_hidden_states,
+                        temb=temb,
+                        image_rotary_emb=image_rotary_emb,
+                        num_frames=video_length,
+                        height=height // self.patch_size,
+                        width=width // self.patch_size,
+                    )
+
+            hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
+            hidden_states = self.norm_final(hidden_states)
+            hidden_states = hidden_states[:, encoder_hidden_states.size()[1] :]
+
+            # 5. Final block
+            hidden_states = self.norm_out(hidden_states, temb=temb)
+
         hidden_states = self.proj_out(hidden_states)
 
         # 6. Unpatchify

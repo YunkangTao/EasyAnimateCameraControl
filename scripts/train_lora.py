@@ -37,9 +37,9 @@ from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.state import AcceleratorState
 from accelerate.utils import ProjectConfiguration, set_seed
-from diffusers import AutoencoderKL, DDPMScheduler
+from diffusers import DDIMScheduler, DDPMScheduler, FlowMatchEulerDiscreteScheduler
 from diffusers.optimization import get_scheduler
-from diffusers.training_utils import EMAModel
+from diffusers.training_utils import EMAModel, _set_state_dict_into_text_encoder, cast_training_params, compute_density_for_timestep_sampling, compute_loss_weighting_for_sd3
 from diffusers.utils import check_min_version, deprecate, is_wandb_available
 from diffusers.utils.import_utils import is_xformers_available
 from diffusers.utils.torch_utils import is_compiled_module
@@ -52,7 +52,17 @@ from torch.utils.data import RandomSampler
 from torch.utils.tensorboard import SummaryWriter
 from torchvision import transforms
 from tqdm.auto import tqdm
-from transformers import BertModel, BertTokenizer, CLIPImageProcessor, CLIPVisionModelWithProjection, T5EncoderModel, T5Tokenizer
+from transformers import (
+    Qwen2Tokenizer,
+    AutoTokenizer,
+    BertModel,
+    BertTokenizer,
+    CLIPImageProcessor,
+    CLIPVisionModelWithProjection,
+    Qwen2VLForConditionalGeneration,
+    T5EncoderModel,
+    T5Tokenizer,
+)
 from transformers.utils import ContextManagers
 
 import datasets
@@ -62,36 +72,18 @@ project_roots = [os.path.dirname(current_file_path), os.path.dirname(os.path.dir
 for project_root in project_roots:
     sys.path.insert(0, project_root) if project_root not in sys.path else None
 
-from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection, T5EncoderModel, T5Tokenizer
-from transformers.utils import ContextManagers
-
 from easyanimate.data.bucket_sampler import (
     ASPECT_RATIO_512,
     ASPECT_RATIO_RANDOM_CROP_512,
     ASPECT_RATIO_RANDOM_CROP_PROB,
-    AspectRatioBatchImageSampler,
     AspectRatioBatchImageVideoSampler,
-    AspectRatioBatchSampler,
     RandomSampler,
     get_closest_ratio,
 )
-from easyanimate.data.dataset_image import CC15M
 from easyanimate.data.dataset_image_video import ImageVideoDataset, ImageVideoSampler, get_random_mask
-from easyanimate.data.dataset_video import VideoDataset, WebVid10M
 from easyanimate.models import name_to_autoencoder_magvit, name_to_transformer3d
-from easyanimate.models.autoencoder_magvit import AutoencoderKLMagvit
-from easyanimate.models.transformer2d import Transformer2DModel
-from easyanimate.models.transformer3d import HunyuanTransformer3DModel, Transformer3DModel
-from easyanimate.pipeline.pipeline_easyanimate import EasyAnimatePipeline
-from easyanimate.pipeline.pipeline_easyanimate_inpaint import EasyAnimateInpaintPipeline
-from easyanimate.pipeline.pipeline_easyanimate_multi_text_encoder import (
-    EasyAnimatePipeline_Multi_Text_Encoder,
-    get_2d_rotary_pos_embed,
-    get_3d_rotary_pos_embed,
-    get_resize_crop_region_for_grid,
-)
-from easyanimate.pipeline.pipeline_easyanimate_multi_text_encoder_inpaint import EasyAnimatePipeline_Multi_Text_Encoder_Inpaint, add_noise_to_reference_video, resize_mask
-from easyanimate.pipeline.pipeline_pixart_magvit import PixArtAlphaMagvitPipeline
+from easyanimate.pipeline.pipeline_easyanimate import EasyAnimatePipeline, get_2d_rotary_pos_embed, get_3d_rotary_pos_embed, get_resize_crop_region_for_grid
+from easyanimate.pipeline.pipeline_easyanimate_inpaint import EasyAnimateInpaintPipeline, add_noise_to_reference_video, resize_mask
 from easyanimate.utils import gaussian_diffusion as gd
 from easyanimate.utils.discrete_sampler import DiscreteSampling
 from easyanimate.utils.lora_utils import create_network, merge_lora, unmerge_lora
@@ -151,37 +143,69 @@ def encode_prompt(
     add_special_tokens=False,
     enable_text_attention_mask=True,
 ):
-    if max_sequence_length is None:
-        max_length = min(tokenizer.model_max_length, tokenizer_max_length)
-    else:
-        max_length = max_sequence_length
+    if type(tokenizer) in [BertTokenizer, T5Tokenizer]:
+        if max_sequence_length is None:
+            max_length = min(tokenizer.model_max_length, tokenizer_max_length)
+        else:
+            max_length = max_sequence_length
 
-    text_inputs = tokenizer(
-        prompt,
-        padding="max_length",
-        max_length=max_length,
-        truncation=True,
-        return_attention_mask=True,
-        add_special_tokens=add_special_tokens,
-        return_tensors="pt",
-    )
+        text_inputs = tokenizer(
+            prompt,
+            padding="max_length",
+            max_length=max_length,
+            truncation=True,
+            return_attention_mask=True,
+            add_special_tokens=add_special_tokens,
+            return_tensors="pt",
+        )
+        if device is not None:
+            text_input_ids = text_inputs.input_ids.to(device)
+            prompt_attention_mask = text_inputs.attention_mask.to(device)
+        else:
+            text_input_ids = text_inputs.input_ids
+            prompt_attention_mask = text_inputs.attention_mask
 
-    if device is not None:
-        text_input_ids = text_inputs.input_ids.to(device)
-        prompt_attention_mask = text_inputs.attention_mask.to(device)
+        if enable_text_attention_mask:
+            prompt_embeds = text_encoder(
+                text_input_ids,
+                attention_mask=prompt_attention_mask,
+            )[0]
+        else:
+            prompt_embeds = text_encoder(text_input_ids)[0]
+        prompt_embeds = prompt_embeds.to(dtype=dtype, device=device)
+        prompt_attention_mask = prompt_attention_mask.to(dtype=dtype, device=device)
     else:
+        max_length = tokenizer_max_length
+        texts = []
+        for _prompt in prompt:
+            messages = [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": _prompt}],
+                }
+            ]
+            text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            texts.append(text)
+        text_inputs = tokenizer(
+            text=texts,
+            images=None,
+            videos=None,
+            padding="max_length",
+            max_length=max_length,
+            truncation=True,
+            return_attention_mask=True,
+            padding_side="right",
+            return_tensors="pt",
+        )
+        text_inputs = text_inputs.to(text_encoder.device)
+
         text_input_ids = text_inputs.input_ids
         prompt_attention_mask = text_inputs.attention_mask
-
-    if enable_text_attention_mask:
-        prompt_embeds = text_encoder(
-            text_input_ids,
-            attention_mask=prompt_attention_mask,
-        )[0]
-    else:
-        prompt_embeds = text_encoder(text_input_ids)[0]
-    prompt_embeds = prompt_embeds.to(dtype=dtype, device=device)
-    prompt_attention_mask = prompt_attention_mask.to(dtype=dtype, device=device)
+        if enable_text_attention_mask:
+            # Inference: Generation of the output
+            prompt_embeds = text_encoder(input_ids=text_input_ids, attention_mask=prompt_attention_mask, output_hidden_states=True).hidden_states[-2]
+        else:
+            raise ValueError("LLM needs attention_mask")
     return prompt_embeds, prompt_attention_mask
 
 
@@ -237,53 +261,34 @@ def log_validation(
         ).to(weight_dtype)
         transformer3d_val.load_state_dict(accelerator.unwrap_model(transformer3d).state_dict())
 
-        if config['text_encoder_kwargs'].get('enable_multi_text_encoder', False):
-            if args.train_mode != "normal":
-                pipeline = EasyAnimatePipeline_Multi_Text_Encoder_Inpaint.from_pretrained(
-                    args.pretrained_model_name_or_path,
-                    vae=accelerator.unwrap_model(vae).to(weight_dtype),
-                    text_encoder=accelerator.unwrap_model(text_encoder),
-                    text_encoder_2=accelerator.unwrap_model(text_encoder_2),
-                    tokenizer=tokenizer,
-                    tokenizer_2=tokenizer_2,
-                    transformer=transformer3d_val,
-                    torch_dtype=weight_dtype,
-                    clip_image_encoder=image_encoder,
-                    clip_image_processor=image_processor,
-                )
-            else:
-                pipeline = EasyAnimatePipeline_Multi_Text_Encoder.from_pretrained(
-                    args.pretrained_model_name_or_path,
-                    vae=accelerator.unwrap_model(vae).to(weight_dtype),
-                    text_encoder=accelerator.unwrap_model(text_encoder),
-                    text_encoder_2=accelerator.unwrap_model(text_encoder_2),
-                    tokenizer=tokenizer,
-                    tokenizer_2=tokenizer_2,
-                    transformer=transformer3d_val,
-                    torch_dtype=weight_dtype,
-                )
+        if args.loss_type == "flow":
+            scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
         else:
-            if args.train_mode != "normal":
-                pipeline = EasyAnimateInpaintPipeline.from_pretrained(
-                    args.pretrained_model_name_or_path,
-                    vae=accelerator.unwrap_model(vae).to(weight_dtype),
-                    text_encoder=accelerator.unwrap_model(text_encoder),
-                    tokenizer=tokenizer,
-                    transformer=transformer3d_val,
-                    torch_dtype=weight_dtype,
-                    clip_image_encoder=image_encoder,
-                    clip_image_processor=image_processor,
-                )
-            else:
-                pipeline = EasyAnimatePipeline.from_pretrained(
-                    args.pretrained_model_name_or_path,
-                    vae=accelerator.unwrap_model(vae).to(weight_dtype),
-                    text_encoder=accelerator.unwrap_model(text_encoder),
-                    tokenizer=tokenizer,
-                    transformer=transformer3d_val,
-                    torch_dtype=weight_dtype,
-                )
-        pipeline = pipeline.to(accelerator.device)
+            scheduler = DDIMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
+
+        if args.train_mode != "normal":
+            pipeline = EasyAnimateInpaintPipeline(
+                vae=accelerator.unwrap_model(vae).to(weight_dtype),
+                text_encoder=accelerator.unwrap_model(text_encoder),
+                text_encoder_2=accelerator.unwrap_model(text_encoder_2),
+                tokenizer=tokenizer,
+                tokenizer_2=tokenizer_2,
+                transformer=transformer3d_val,
+                scheduler=scheduler,
+                clip_image_encoder=image_encoder,
+                clip_image_processor=image_processor,
+            )
+        else:
+            pipeline = EasyAnimatePipeline(
+                vae=accelerator.unwrap_model(vae).to(weight_dtype),
+                text_encoder=accelerator.unwrap_model(text_encoder),
+                text_encoder_2=accelerator.unwrap_model(text_encoder_2),
+                tokenizer=tokenizer,
+                tokenizer_2=tokenizer_2,
+                transformer=transformer3d_val,
+                scheduler=scheduler,
+            )
+        pipeline = pipeline.to(weight_dtype, accelerator.device)
         pipeline = merge_lora(pipeline, None, 1, accelerator.device, state_dict=accelerator.unwrap_model(network).state_dict(), transformer_only=True)
 
         if args.enable_xformers_memory_efficient_attention and config['transformer_additional_kwargs'].get('transformer_type', 'Transformer3DModel') == 'Transformer3DModel':
@@ -315,7 +320,7 @@ def log_validation(
                             video=input_video,
                             mask_video=input_video_mask,
                             clip_image=clip_image,
-                        ).videos
+                        ).frames
                         os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
                         save_videos_grid(sample, os.path.join(args.output_dir, f"sample/sample-{global_step}-{i}.gif"))
 
@@ -333,7 +338,7 @@ def log_validation(
                             video=input_video,
                             mask_video=input_video_mask,
                             clip_image=clip_image,
-                        ).videos
+                        ).frames
                         os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
                         save_videos_grid(sample, os.path.join(args.output_dir, f"sample/sample-{global_step}-image-{i}.gif"))
                 else:
@@ -345,7 +350,7 @@ def log_validation(
                             height=args.video_sample_size,
                             width=args.video_sample_size,
                             generator=generator,
-                        ).videos
+                        ).frames
                         os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
                         save_videos_grid(sample, os.path.join(args.output_dir, f"sample/sample-{global_step}-{i}.gif"))
 
@@ -356,7 +361,7 @@ def log_validation(
                             height=args.video_sample_size,
                             width=args.video_sample_size,
                             generator=generator,
-                        ).videos
+                        ).frames
                         os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
                         save_videos_grid(sample, os.path.join(args.output_dir, f"sample/sample-{global_step}-image-{i}.gif"))
 
@@ -654,6 +659,24 @@ def parse_args():
         help="The training stage of the model in training.",
     )
     parser.add_argument("--noise_share_in_frames", action="store_true", help="Whether enable noise share in frames.")
+    parser.add_argument("--uniform_sampling", action="store_true", help="Whether or not to use uniform_sampling.")
+    parser.add_argument(
+        "--loss_type",
+        type=str,
+        default="sigma",
+        help=('The format of training data. Support `"sigma"`' ' (default), `"ddpm"`, `"flow"`.'),
+    )
+    parser.add_argument("--enable_text_encoder_in_dataloader", action="store_true", help="Whether or not to use text encoder in dataloader.")
+    parser.add_argument("--enable_bucket", action="store_true", help="Whether enable bucket sample in datasets.")
+    parser.add_argument("--random_ratio_crop", action="store_true", help="Whether enable random ratio crop sample in datasets.")
+    parser.add_argument("--random_frame_crop", action="store_true", help="Whether enable random frame crop sample in datasets.")
+    parser.add_argument("--random_hw_adapt", action="store_true", help="Whether enable random adapt height and width in datasets.")
+    parser.add_argument(
+        "--training_with_video_token_length",
+        action="store_true",
+        help="The training stage of the model in training.",
+    )
+    parser.add_argument("--noise_share_in_frames", action="store_true", help="Whether enable noise share in frames.")
     parser.add_argument(
         "--noise_share_in_frames_ratio",
         type=float,
@@ -757,6 +780,22 @@ def parse_args():
         help=('The initial gradient is relative to the multiple of the max_grad_norm. '),
     )
 
+    parser.add_argument(
+        "--weighting_scheme",
+        type=str,
+        default="none",
+        choices=["sigma_sqrt", "logit_normal", "mode", "cosmap", "none"],
+        help=('We default to the "none" weighting scheme for uniform sampling and uniform loss'),
+    )
+    parser.add_argument("--logit_mean", type=float, default=0.0, help="mean to use when using the `'logit_normal'` weighting scheme.")
+    parser.add_argument("--logit_std", type=float, default=1.0, help="std to use when using the `'logit_normal'` weighting scheme.")
+    parser.add_argument(
+        "--mode_scale",
+        type=float,
+        default=1.29,
+        help="Scale of mode weighting scheme. Only effective when using the `'mode'` as the `weighting_scheme`.",
+    )
+
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
     if env_local_rank != -1 and env_local_rank != args.local_rank:
@@ -841,8 +880,10 @@ def main():
         args.mixed_precision = accelerator.mixed_precision
 
     # Load scheduler, tokenizer and models.
-    if args.not_sigma_loss:
+    if args.loss_type == "ddpm":
         noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
+    elif args.loss_type == "flow":
+        noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
     else:
         train_diffusion = SpacedDiffusion(
             use_timesteps=space_timesteps(1000, str(args.train_sampling_steps)),
@@ -857,11 +898,19 @@ def main():
     if config['text_encoder_kwargs'].get('enable_multi_text_encoder', False):
         print("Init BertTokenizer")
         tokenizer = BertTokenizer.from_pretrained(args.pretrained_model_name_or_path, subfolder="tokenizer", revision=args.revision)
-        print("Init T5Tokenizer")
-        tokenizer_2 = T5Tokenizer.from_pretrained(args.pretrained_model_name_or_path, subfolder="tokenizer_2", revision=args.revision)
+        if config['text_encoder_kwargs'].get('replace_t5_to_llm', False):
+            print("Init LLM Processor")
+            tokenizer_2 = Qwen2Tokenizer.from_pretrained(os.path.join(args.pretrained_model_name_or_path, "tokenizer_2"), revision=args.revision)
+        else:
+            print("Init T5Tokenizer")
+            tokenizer_2 = T5Tokenizer.from_pretrained(args.pretrained_model_name_or_path, subfolder="tokenizer_2", revision=args.revision)
     else:
-        print("Init T5Tokenizer")
-        tokenizer = T5Tokenizer.from_pretrained(args.pretrained_model_name_or_path, subfolder="tokenizer", revision=args.revision)
+        if config['text_encoder_kwargs'].get('replace_t5_to_llm', False):
+            print("Init LLM Processor")
+            tokenizer = Qwen2Tokenizer.from_pretrained(os.path.join(args.pretrained_model_name_or_path, "tokenizer"), revision=args.revision)
+        else:
+            print("Init T5Tokenizer")
+            tokenizer = T5Tokenizer.from_pretrained(args.pretrained_model_name_or_path, subfolder="tokenizer", revision=args.revision)
         tokenizer_2 = None
 
     def deepspeed_zero_init_disabled_context_manager():
@@ -888,13 +937,33 @@ def main():
             text_encoder = BertModel.from_pretrained(
                 args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant, torch_dtype=weight_dtype
             )
-            text_encoder_2 = T5EncoderModel.from_pretrained(
-                args.pretrained_model_name_or_path, subfolder="text_encoder_2", revision=args.revision, variant=args.variant, torch_dtype=weight_dtype
-            )
+            if config['text_encoder_kwargs'].get('replace_t5_to_llm', False):
+                text_encoder_2 = Qwen2VLForConditionalGeneration.from_pretrained(
+                    os.path.join(args.pretrained_model_name_or_path, "text_encoder_2"),
+                    revision=args.revision,
+                    variant=args.variant,
+                    torch_dtype=weight_dtype,
+                )
+            else:
+                text_encoder_2 = T5EncoderModel.from_pretrained(
+                    args.pretrained_model_name_or_path,
+                    subfolder="text_encoder_2",
+                    revision=args.revision,
+                    variant=args.variant,
+                    torch_dtype=weight_dtype,
+                )
         else:
-            text_encoder = T5EncoderModel.from_pretrained(
-                args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant, torch_dtype=weight_dtype
-            )
+            if config['text_encoder_kwargs'].get('replace_t5_to_llm', False):
+                text_encoder = Qwen2VLForConditionalGeneration.from_pretrained(
+                    os.path.join(args.pretrained_model_name_or_path, "text_encoder"),
+                    revision=args.revision,
+                    variant=args.variant,
+                    torch_dtype=weight_dtype,
+                )
+            else:
+                text_encoder = T5EncoderModel.from_pretrained(
+                    args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant, torch_dtype=weight_dtype
+                )
             text_encoder_2 = None
 
         # Get Vae
@@ -985,9 +1054,6 @@ def main():
             if accelerator.is_main_process:
                 safetensor_save_path = os.path.join(output_dir, f"lora_diffusion_pytorch_model.safetensors")
                 save_model(safetensor_save_path, accelerator.unwrap_model(models[-1]))
-                if not args.use_deepspeed:
-                    for _ in range(len(weights)):
-                        weights.pop()
 
                 with open(os.path.join(output_dir, "sampler_pos_start.pkl"), 'wb') as file:
                     pickle.dump([batch_sampler.sampler._pos_start, first_epoch], file)
@@ -1784,7 +1850,7 @@ def main():
                 timesteps = idx_sampling(bsz, generator=torch_rng, device=latents.device)
                 timesteps = timesteps.long()
 
-                if args.not_sigma_loss:
+                if args.loss_type != "sigma":
                     # Create image_rotary_emb, style embedding & time ids
                     height, width = batch["pixel_values"].size()[-2], batch["pixel_values"].size()[-1]
 
@@ -1821,14 +1887,45 @@ def main():
                     add_time_ids = add_time_ids.to(dtype=prompt_embeds.dtype, device=latents.device).repeat(bsz, 1)
                     style = style.to(device=latents.device).repeat(bsz)
 
-                    # Add noise
-                    noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
-                    if noise_scheduler.config.prediction_type == "epsilon":
-                        target = noise
-                    elif noise_scheduler.config.prediction_type == "v_prediction":
-                        target = noise_scheduler.get_velocity(latents, noise, timesteps)
+                    if args.loss_type == "ddpm":
+                        # Add noise
+                        noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+                        if noise_scheduler.config.prediction_type == "epsilon":
+                            target = noise
+                        elif noise_scheduler.config.prediction_type == "v_prediction":
+                            target = noise_scheduler.get_velocity(latents, noise, timesteps)
+                        else:
+                            raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
                     else:
-                        raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
+
+                        def get_sigmas(timesteps, n_dim=4, dtype=torch.float32):
+                            sigmas = noise_scheduler.sigmas.to(device=accelerator.device, dtype=dtype)
+                            schedule_timesteps = noise_scheduler.timesteps.to(accelerator.device)
+                            timesteps = timesteps.to(accelerator.device)
+                            step_indices = [(schedule_timesteps == t).nonzero().item() for t in timesteps]
+
+                            sigma = sigmas[step_indices].flatten()
+                            while len(sigma.shape) < n_dim:
+                                sigma = sigma.unsqueeze(-1)
+                            return sigma
+
+                        u = compute_density_for_timestep_sampling(
+                            weighting_scheme=args.weighting_scheme,
+                            batch_size=bsz,
+                            logit_mean=args.logit_mean,
+                            logit_std=args.logit_std,
+                            mode_scale=args.mode_scale,
+                        )
+                        indices = (u * noise_scheduler.config.num_train_timesteps).long()
+                        timesteps = noise_scheduler.timesteps[indices].to(device=latents.device)
+
+                        # Add noise according to flow matching.
+                        # zt = (1 - texp) * x + texp * z1
+                        sigmas = get_sigmas(timesteps, n_dim=latents.ndim, dtype=latents.dtype)
+                        noisy_latents = (1.0 - sigmas) * latents + sigmas * noise
+
+                        # Add noise
+                        target = noise - latents
 
                     # Predict the noise residual
                     noise_pred = transformer3d(
@@ -1849,17 +1946,24 @@ def main():
                     if noise_pred.size()[1] != vae.config.latent_channels:
                         noise_pred, _ = noise_pred.chunk(2, dim=1)
 
-                    def custom_mse_loss(noise_pred, target, threshold=50):
+                    def custom_mse_loss(noise_pred, target, weighting=None, threshold=50):
                         noise_pred = noise_pred.float()
                         target = target.float()
                         diff = noise_pred - target
                         mse_loss = F.mse_loss(noise_pred, target, reduction='none')
                         mask = (diff.abs() <= threshold).float()
                         masked_loss = mse_loss * mask
+                        if weighting is not None:
+                            masked_loss = masked_loss * weighting
                         final_loss = masked_loss.mean()
                         return final_loss
 
-                    loss = custom_mse_loss(noise_pred.float(), target.float())
+                    if args.loss_type == "ddpm":
+                        loss = custom_mse_loss(noise_pred.float(), target.float())
+                    else:
+                        weighting = compute_loss_weighting_for_sd3(weighting_scheme=args.weighting_scheme, sigmas=sigmas)
+                        loss = custom_mse_loss(noise_pred.float(), target.float(), weighting.float())
+                        loss = loss.mean()
 
                     if args.motion_sub_loss and noise_pred.size()[2] > 2:
                         gt_sub_noise = noise_pred[:, :, 1:].float() - noise_pred[:, :, :-1].float()

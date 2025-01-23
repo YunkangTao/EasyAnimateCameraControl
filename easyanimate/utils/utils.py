@@ -409,78 +409,68 @@ def get_image_to_video_latent(validation_image_start, validation_image_end, vide
 
 
 def get_video_to_video_latent(input_video_path, video_length, sample_size, fps=None, validation_video_mask=None, ref_image=None):
-    if isinstance(input_video_path, str):
-        cap = cv2.VideoCapture(input_video_path)
-        input_video = []
+    if input_video_path is not None:
+        if isinstance(input_video_path, str):
+            cap = cv2.VideoCapture(input_video_path)
+            input_video = []
 
-        # original_fps = cap.get(cv2.CAP_PROP_FPS)
-        # frame_skip = 1 if fps is None else int(original_fps // fps)
+            original_fps = cap.get(cv2.CAP_PROP_FPS)
+            frame_skip = 1 if fps is None else int(original_fps // fps)
 
-        frame_skip = 1
-        # 获取视频的宽度和高度
-        ori_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        ori_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            frame_count = 0
 
-        frame_count = 0
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
 
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
+                if frame_count % frame_skip == 0:
+                    frame = cv2.resize(frame, (sample_size[1], sample_size[0]))
+                    input_video.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
-            if frame_count % frame_skip == 0:
-                frame = cv2.resize(frame, (sample_size[1], sample_size[0]))
-                input_video.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                frame_count += 1
 
-            frame_count += 1
+            cap.release()
+        else:
+            input_video = input_video_path
 
-        cap.release()
+        input_video = torch.from_numpy(np.array(input_video))[:video_length]
+        input_video = input_video.permute([3, 0, 1, 2]).unsqueeze(0) / 255
+
+        if validation_video_mask is not None:
+            validation_video_mask = Image.open(validation_video_mask).convert('L').resize((sample_size[1], sample_size[0]))
+            input_video_mask = np.where(np.array(validation_video_mask) < 240, 0, 255)
+
+            input_video_mask = torch.from_numpy(np.array(input_video_mask)).unsqueeze(0).unsqueeze(-1).permute([3, 0, 1, 2]).unsqueeze(0)
+            input_video_mask = torch.tile(input_video_mask, [1, 1, input_video.size()[2], 1, 1])
+            input_video_mask = input_video_mask.to(input_video.device, input_video.dtype)
+        else:
+            input_video_mask = torch.zeros_like(input_video[:, :1])
+            input_video_mask[:, :, :] = 255
     else:
-        input_video = input_video_path
-
-    input_video = torch.from_numpy(np.array(input_video))[:video_length]
-    input_video = input_video.permute([3, 0, 1, 2]).unsqueeze(0) / 255
+        input_video, input_video_mask = None, None
 
     if ref_image is not None:
-        ref_image = Image.open(ref_image)
-        ref_image = torch.from_numpy(np.array(ref_image))
-        ref_image = ref_image.unsqueeze(0).permute([3, 0, 1, 2]).unsqueeze(0) / 255
-
-    if validation_video_mask is not None:
-        validation_video_mask = Image.open(validation_video_mask).convert('L').resize((sample_size[1], sample_size[0]))
-        input_video_mask = np.where(np.array(validation_video_mask) < 240, 0, 255)
-
-        input_video_mask = torch.from_numpy(np.array(input_video_mask)).unsqueeze(0).unsqueeze(-1).permute([3, 0, 1, 2]).unsqueeze(0)
-        input_video_mask = torch.tile(input_video_mask, [1, 1, input_video.size()[2], 1, 1])
-        input_video_mask = input_video_mask.to(input_video.device, input_video.dtype)
-    else:
-        input_video_mask = torch.zeros_like(input_video[:, :1])
-        input_video_mask[:, :, 1:] = 255
-
-    clip_images = input_video.permute(0, 2, 3, 4, 1).contiguous()
-    clip_images = (clip_images * 0.5 + 0.5) * 255
-
-    return input_video, input_video_mask, clip_images, ori_h, ori_w
+        if isinstance(ref_image, str):
+            ref_image = Image.open(ref_image).convert("RGB")
+            ref_image = ref_image.resize((sample_size[1], sample_size[0]))
+            ref_image = torch.from_numpy(np.array(ref_image))
+            ref_image = ref_image.unsqueeze(0).permute([3, 0, 1, 2]).unsqueeze(0) / 255
+        else:
+            ref_image = torch.from_numpy(np.array(ref_image))
+            ref_image = ref_image.unsqueeze(0).permute([3, 0, 1, 2]).unsqueeze(0) / 255
+    return input_video, input_video_mask, ref_image
 
 
-def get_evaluation_model_input(groud_truth_path, clip_video_path, pose_file_path, video_length, video_sample_stride, sample_size):
-    GT_video, ori_h, ori_w = get_video_from_dir(groud_truth_path)
-    whole_camera_para = get_camera_from_dir(pose_file_path)
-    assert len(GT_video) == len(whole_camera_para), "the length of video must be euqal with that of camera parameter."
+def get_image_latent(ref_image=None, sample_size=None):
+    if ref_image is not None:
+        if isinstance(ref_image, str):
+            ref_image = Image.open(ref_image).convert("RGB")
+            ref_image = ref_image.resize((sample_size[1], sample_size[0]))
+            ref_image = torch.from_numpy(np.array(ref_image))
+            ref_image = ref_image.unsqueeze(0).permute([3, 0, 1, 2]).unsqueeze(0) / 255
+        else:
+            ref_image = torch.from_numpy(np.array(ref_image))
+            ref_image = ref_image.unsqueeze(0).permute([3, 0, 1, 2]).unsqueeze(0) / 255
 
-    if clip_video_path is not None:
-        pass
-    else:
-        batch_index_input, batch_index_output = get_batch_index(len(GT_video), video_length, video_sample_stride)
-        plucker_embedding_input, plucker_embedding_output = get_plucker_embedding(
-            whole_camera_para,
-            batch_index_input,
-            batch_index_output,
-            sample_size,
-            ori_h,
-            ori_w,
-        )
-        # pixel_values_input, pixel_values_output = get_pixel_value(GT_video, batch_index_input, batch_index_output, video_transforms)
-        # input_video
-
-    # return input_video, input_video_mask, clip_images, plucker_embedding
+    return ref_image
