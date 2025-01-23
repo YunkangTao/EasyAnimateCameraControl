@@ -21,7 +21,7 @@ accelerate launch \
   --video_sample_size=512 \
   --video_sample_stride=4 \
   --video_sample_n_frames=49 \
-  --train_batch_size=2 \
+  --train_batch_size=1 \
   --gradient_accumulation_steps=1 \
   --dataloader_num_workers=1 \
   --num_train_epochs=3 \

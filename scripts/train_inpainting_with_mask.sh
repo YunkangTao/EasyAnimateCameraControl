@@ -24,7 +24,7 @@ accelerate launch \
   --train_batch_size=2 \
   --gradient_accumulation_steps=1 \
   --dataloader_num_workers=8 \
-  --num_train_epochs=3 \
+  --num_train_epochs=30 \
   --checkpointing_steps=6778 \
   --learning_rate=2e-05 \
   --lr_scheduler="constant_with_warmup" \
