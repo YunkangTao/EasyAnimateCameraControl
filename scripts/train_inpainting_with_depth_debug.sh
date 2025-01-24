@@ -41,4 +41,5 @@ accelerate launch \
   --uniform_sampling \
   --use_deepspeed \
   --train_mode="inpaint" \
-  --trainable_modules "depth_head."
+  --trainable_modules "depth_head." \
+  --resume_from_checkpoint="latest"

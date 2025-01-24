@@ -354,6 +354,16 @@ def splatting_function(
         assert importance_metric.shape[1] == 1
         assert importance_metric.shape[2] == frame.shape[2]
         assert importance_metric.shape[3] == frame.shape[3]
+
+        # # 检查是否存在 NaN 或 Inf
+        # if torch.isnan(importance_metric).any() or torch.isinf(importance_metric).any():
+        #     raise ValueError("importance_metric contains NaN or Inf before exp()")
+
+        # # 检查最大最小值
+        # max_val = importance_metric.max()
+        # min_val = importance_metric.min()
+        # print(f"Before exp - max: {max_val}, min: {min_val}")
+
         importance_metric = importance_metric.exp()
         frame = torch.cat([frame * importance_metric, importance_metric], 1)
     else:
@@ -379,7 +389,7 @@ def forward_warper(
 
     # Projection.
     points_c = pcd @ mvp_mtx.mT
-    points_ndc = points_c / points_c[..., 3:4]
+    points_ndc = points_c / (points_c[..., 3:4] + 1e-8)
     # To screen.
     coords_new = points_ndc @ viewport_mtx.mT
 
@@ -391,9 +401,9 @@ def forward_warper(
     new_z = points_c[..., 2:3]
     flow = coords_new[..., :2] - screen[..., :2]
     ## Importance.
-    importance = alpha / new_z
-    importance -= importance.amin((1, 2), keepdim=True)
-    importance /= importance.amax((1, 2), keepdim=True) + 1e-6
+    importance = alpha / (new_z + 1e-8)
+    importance = importance - importance.amin((1, 2), keepdim=True)
+    importance = importance / importance.amax((1, 2), keepdim=True) + 1e-6
     importance = importance * 10 - 10
     ## Rearrange.
     importance = rearrange(importance, 'b (h w) c -> b c h w', h=H, w=W)

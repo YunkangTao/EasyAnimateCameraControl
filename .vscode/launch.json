@@ -17,7 +17,8 @@
                     "localRoot": "${workspaceFolder}",
                     "remoteRoot": "/home/chenyang_lei/video_diffusion_models/EasyAnimateCameraControl"
                 }
-            ]
+            ],
+            "justMyCode": false
         },
         {
             "name": "Python train v2v camera control wo deepspeed",

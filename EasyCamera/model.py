@@ -11,6 +11,9 @@ def _batch_encode_vae(pixel_values, vae, vae_mini_batch, weight_dtype, video_len
     """
     将原先的内嵌函数独立出来，做小幅优化。
     """
+    for param in vae.parameters():
+        param.requires_grad = False
+
     # pixel_values: (B, F, 3, 512, 512) or (B, F, C, H, W)
     # VAE 可能有 5 维的卷积权重（3D VAE），也可能是普通 4 维 ...
     if vae.quant_conv is None or (vae.quant_conv.weight is not None and vae.quant_conv.weight.ndim == 5):
@@ -152,7 +155,7 @@ def get_inpaint_latents_from_depth(
         [
             transforms.Resize(video_sample_size),
             transforms.CenterCrop((video_sample_size, video_sample_size)),
-            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=False),
         ]
     )
 
@@ -192,10 +195,11 @@ def get_inpaint_latents_from_depth(
     mask_reshape = resize_mask(mask_reshape, latents, vae.cache_mag_vae)
 
     # 5. 可选：对原视频添加噪声
-    mask_pixel_values_with_noise = add_noise_to_reference_video(mask_warped)
+    mask_pixel_values_with_noise = add_noise_to_reference_video(mask_pixel_values)
 
     # 6. 编码 inpaint latents：将 mask_pixel_values 传进 VAE 得到 mask_latents
-    mask_latents = _batch_encode_vae(mask_pixel_values_with_noise, vae, vae_mini_batch, weight_dtype, video_length)
+    with torch.no_grad():
+        mask_latents = _batch_encode_vae(mask_pixel_values_with_noise, vae, vae_mini_batch, weight_dtype, video_length)
 
     # 拼接 inpaint_latents: (B, 1+潜编码通道, F, H, W)
     inpaint_latents = torch.cat([mask_reshape, mask_latents], dim=1)
@@ -286,9 +290,6 @@ class EasyCamera(nn.Module):
             vae_mini_batch,
             video_length,
         )
-
-        del vae
-        torch.cuda.empty_cache()
 
         inpaint_latents = inpaint_latents.to(noisy_latents.dtype)
         noise_pred = self.easyanimate(

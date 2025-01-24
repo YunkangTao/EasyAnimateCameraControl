@@ -15,13 +15,13 @@
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
-import debugpy
+# import debugpy
 
-# 允许其他机器连接
-debugpy.listen(("0.0.0.0", 5678))
-print("等待调试器连接...")
-debugpy.wait_for_client()  # 阻塞，直到调试器连接
-print("调试器已连接")
+# # 允许其他机器连接
+# debugpy.listen(("0.0.0.0", 5678))
+# print("等待调试器连接...")
+# debugpy.wait_for_client()  # 阻塞，直到调试器连接
+# print("调试器已连接")
 
 import argparse
 import gc
@@ -39,7 +39,7 @@ import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 import transformers
-from accelerate import Accelerator
+from accelerate import Accelerator, DistributedType
 from accelerate.logging import get_logger
 from accelerate.state import AcceleratorState
 from accelerate.utils import ProjectConfiguration, set_seed
@@ -55,6 +55,7 @@ from omegaconf import OmegaConf
 from packaging import version
 from PIL import Image
 
+torch.autograd.set_detect_anomaly(True)
 # from torch.utils.data import RandomSampler
 from torch.utils.tensorboard import SummaryWriter
 from torchvision import transforms
@@ -93,19 +94,7 @@ from easyanimate.data.dataset_inpainting_with_depth import (
     VideoSamplerWithDepth,
 )
 from easyanimate.models import name_to_autoencoder_magvit, name_to_transformer3d
-from easyanimate.pipeline.pipeline_easyanimate import EasyAnimatePipeline
-from easyanimate.pipeline.pipeline_easyanimate_inpaint import EasyAnimateInpaintPipeline
-from easyanimate.pipeline.pipeline_easyanimate_multi_text_encoder import (
-    EasyAnimatePipeline_Multi_Text_Encoder,
-    get_2d_rotary_pos_embed,
-    get_3d_rotary_pos_embed,
-    get_resize_crop_region_for_grid,
-)
-from easyanimate.pipeline.pipeline_easyanimate_multi_text_encoder_inpaint import (
-    EasyAnimatePipeline_Multi_Text_Encoder_Inpaint,
-    add_noise_to_reference_video,
-    resize_mask,
-)
+from easyanimate.pipeline.pipeline_easyanimate import get_2d_rotary_pos_embed, get_3d_rotary_pos_embed, get_resize_crop_region_for_grid
 from easyanimate.utils import gaussian_diffusion as gd
 from easyanimate.utils.discrete_sampler import DiscreteSampling
 from easyanimate.utils.respace import SpacedDiffusion, space_timesteps
@@ -240,153 +229,153 @@ check_min_version("0.18.0.dev0")
 logger = get_logger(__name__, log_level="INFO")
 
 
-def log_validation(vae, text_encoder, text_encoder_2, tokenizer, tokenizer_2, transformer3d, image_encoder, image_processor, config, args, accelerator, weight_dtype, global_step):
-    try:
-        logger.info("Running validation... ")
+# def log_validation(vae, text_encoder, text_encoder_2, tokenizer, tokenizer_2, transformer3d, image_encoder, image_processor, config, args, accelerator, weight_dtype, global_step):
+#     try:
+#         logger.info("Running validation... ")
 
-        # Get New Transformer
-        Choosen_Transformer3DModel = name_to_transformer3d[config['transformer_additional_kwargs'].get('transformer_type', 'Transformer3DModel')]
+#         # Get New Transformer
+#         Choosen_Transformer3DModel = name_to_transformer3d[config['transformer_additional_kwargs'].get('transformer_type', 'Transformer3DModel')]
 
-        transformer3d_val = Choosen_Transformer3DModel.from_pretrained_2d(
-            args.pretrained_model_name_or_path, subfolder="transformer", transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs'])
-        ).to(weight_dtype)
-        transformer3d_val.load_state_dict(accelerator.unwrap_model(transformer3d).state_dict())
+#         transformer3d_val = Choosen_Transformer3DModel.from_pretrained_2d(
+#             args.pretrained_model_name_or_path, subfolder="transformer", transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs'])
+#         ).to(weight_dtype)
+#         transformer3d_val.load_state_dict(accelerator.unwrap_model(transformer3d).state_dict())
 
-        if config['text_encoder_kwargs'].get('enable_multi_text_encoder', False):
-            if args.train_mode != "normal":
-                pipeline = EasyAnimatePipeline_Multi_Text_Encoder_Inpaint.from_pretrained(
-                    args.pretrained_model_name_or_path,
-                    vae=accelerator.unwrap_model(vae).to(weight_dtype),
-                    text_encoder=accelerator.unwrap_model(text_encoder),
-                    text_encoder_2=accelerator.unwrap_model(text_encoder_2),
-                    tokenizer=tokenizer,
-                    tokenizer_2=tokenizer_2,
-                    transformer=transformer3d_val,
-                    torch_dtype=weight_dtype,
-                    clip_image_encoder=image_encoder,
-                    clip_image_processor=image_processor,
-                )
-            else:
-                pipeline = EasyAnimatePipeline_Multi_Text_Encoder.from_pretrained(
-                    args.pretrained_model_name_or_path,
-                    vae=accelerator.unwrap_model(vae).to(weight_dtype),
-                    text_encoder=accelerator.unwrap_model(text_encoder),
-                    text_encoder_2=accelerator.unwrap_model(text_encoder_2),
-                    tokenizer=tokenizer,
-                    tokenizer_2=tokenizer_2,
-                    transformer=transformer3d_val,
-                    torch_dtype=weight_dtype,
-                )
-        else:
-            if args.train_mode != "normal":
-                pipeline = EasyAnimateInpaintPipeline.from_pretrained(
-                    args.pretrained_model_name_or_path,
-                    vae=accelerator.unwrap_model(vae).to(weight_dtype),
-                    text_encoder=accelerator.unwrap_model(text_encoder),
-                    tokenizer=tokenizer,
-                    transformer=transformer3d_val,
-                    torch_dtype=weight_dtype,
-                    clip_image_encoder=image_encoder,
-                    clip_image_processor=image_processor,
-                )
-            else:
-                pipeline = EasyAnimatePipeline.from_pretrained(
-                    args.pretrained_model_name_or_path,
-                    vae=accelerator.unwrap_model(vae).to(weight_dtype),
-                    text_encoder=accelerator.unwrap_model(text_encoder),
-                    tokenizer=tokenizer,
-                    transformer=transformer3d_val,
-                    torch_dtype=weight_dtype,
-                )
-        pipeline = pipeline.to(accelerator.device)
+#         if config['text_encoder_kwargs'].get('enable_multi_text_encoder', False):
+#             if args.train_mode != "normal":
+#                 pipeline = EasyAnimatePipeline_Multi_Text_Encoder_Inpaint.from_pretrained(
+#                     args.pretrained_model_name_or_path,
+#                     vae=accelerator.unwrap_model(vae).to(weight_dtype),
+#                     text_encoder=accelerator.unwrap_model(text_encoder),
+#                     text_encoder_2=accelerator.unwrap_model(text_encoder_2),
+#                     tokenizer=tokenizer,
+#                     tokenizer_2=tokenizer_2,
+#                     transformer=transformer3d_val,
+#                     torch_dtype=weight_dtype,
+#                     clip_image_encoder=image_encoder,
+#                     clip_image_processor=image_processor,
+#                 )
+#             else:
+#                 pipeline = EasyAnimatePipeline_Multi_Text_Encoder.from_pretrained(
+#                     args.pretrained_model_name_or_path,
+#                     vae=accelerator.unwrap_model(vae).to(weight_dtype),
+#                     text_encoder=accelerator.unwrap_model(text_encoder),
+#                     text_encoder_2=accelerator.unwrap_model(text_encoder_2),
+#                     tokenizer=tokenizer,
+#                     tokenizer_2=tokenizer_2,
+#                     transformer=transformer3d_val,
+#                     torch_dtype=weight_dtype,
+#                 )
+#         else:
+#             if args.train_mode != "normal":
+#                 pipeline = EasyAnimateInpaintPipeline.from_pretrained(
+#                     args.pretrained_model_name_or_path,
+#                     vae=accelerator.unwrap_model(vae).to(weight_dtype),
+#                     text_encoder=accelerator.unwrap_model(text_encoder),
+#                     tokenizer=tokenizer,
+#                     transformer=transformer3d_val,
+#                     torch_dtype=weight_dtype,
+#                     clip_image_encoder=image_encoder,
+#                     clip_image_processor=image_processor,
+#                 )
+#             else:
+#                 pipeline = EasyAnimatePipeline.from_pretrained(
+#                     args.pretrained_model_name_or_path,
+#                     vae=accelerator.unwrap_model(vae).to(weight_dtype),
+#                     text_encoder=accelerator.unwrap_model(text_encoder),
+#                     tokenizer=tokenizer,
+#                     transformer=transformer3d_val,
+#                     torch_dtype=weight_dtype,
+#                 )
+#         pipeline = pipeline.to(accelerator.device)
 
-        if args.enable_xformers_memory_efficient_attention and config['transformer_additional_kwargs'].get('transformer_type', 'Transformer3DModel') == 'Transformer3DModel':
-            pipeline.enable_xformers_memory_efficient_attention()
+#         if args.enable_xformers_memory_efficient_attention and config['transformer_additional_kwargs'].get('transformer_type', 'Transformer3DModel') == 'Transformer3DModel':
+#             pipeline.enable_xformers_memory_efficient_attention()
 
-        if args.seed is None:
-            generator = None
-        else:
-            generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
+#         if args.seed is None:
+#             generator = None
+#         else:
+#             generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
 
-        for i in range(len(args.validation_prompts)):
-            with torch.no_grad():
-                if args.train_mode != "normal":
-                    with torch.autocast("cuda", dtype=weight_dtype):
-                        if vae.cache_mag_vae:
-                            video_length = int((args.video_sample_n_frames - 1) // vae.mini_batch_encoder * vae.mini_batch_encoder) + 1 if args.video_sample_n_frames != 1 else 1
-                        else:
-                            video_length = int(args.video_sample_n_frames // vae.mini_batch_encoder * vae.mini_batch_encoder) if args.video_sample_n_frames != 1 else 1
-                        input_video, input_video_mask, clip_image = get_image_to_video_latent(
-                            None, None, video_length=video_length, sample_size=[args.video_sample_size, args.video_sample_size]
-                        )
-                        sample = pipeline(
-                            args.validation_prompts[i],
-                            video_length=video_length,
-                            negative_prompt="bad detailed",
-                            height=args.video_sample_size,
-                            width=args.video_sample_size,
-                            generator=generator,
-                            video=input_video,
-                            mask_video=input_video_mask,
-                            clip_image=clip_image,
-                        ).videos
-                        os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
-                        save_videos_grid(sample, os.path.join(args.output_dir, f"sample/sample-{global_step}-{i}.gif"))
+#         for i in range(len(args.validation_prompts)):
+#             with torch.no_grad():
+#                 if args.train_mode != "normal":
+#                     with torch.autocast("cuda", dtype=weight_dtype):
+#                         if vae.cache_mag_vae:
+#                             video_length = int((args.video_sample_n_frames - 1) // vae.mini_batch_encoder * vae.mini_batch_encoder) + 1 if args.video_sample_n_frames != 1 else 1
+#                         else:
+#                             video_length = int(args.video_sample_n_frames // vae.mini_batch_encoder * vae.mini_batch_encoder) if args.video_sample_n_frames != 1 else 1
+#                         input_video, input_video_mask, clip_image = get_image_to_video_latent(
+#                             None, None, video_length=video_length, sample_size=[args.video_sample_size, args.video_sample_size]
+#                         )
+#                         sample = pipeline(
+#                             args.validation_prompts[i],
+#                             video_length=video_length,
+#                             negative_prompt="bad detailed",
+#                             height=args.video_sample_size,
+#                             width=args.video_sample_size,
+#                             generator=generator,
+#                             video=input_video,
+#                             mask_video=input_video_mask,
+#                             clip_image=clip_image,
+#                         ).videos
+#                         os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
+#                         save_videos_grid(sample, os.path.join(args.output_dir, f"sample/sample-{global_step}-{i}.gif"))
 
-                        video_length = 1
-                        input_video, input_video_mask, clip_image = get_image_to_video_latent(
-                            None, None, video_length=video_length, sample_size=[args.video_sample_size, args.video_sample_size]
-                        )
-                        sample = pipeline(
-                            args.validation_prompts[i],
-                            video_length=1,
-                            negative_prompt="bad detailed",
-                            height=args.video_sample_size,
-                            width=args.video_sample_size,
-                            generator=generator,
-                            video=input_video,
-                            mask_video=input_video_mask,
-                            clip_image=clip_image,
-                        ).videos
-                        os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
-                        save_videos_grid(sample, os.path.join(args.output_dir, f"sample/sample-{global_step}-image-{i}.gif"))
-                else:
-                    with torch.autocast("cuda", dtype=weight_dtype):
-                        sample = pipeline(
-                            args.validation_prompts[i],
-                            video_length=video_length,
-                            negative_prompt="bad detailed",
-                            height=args.video_sample_size,
-                            width=args.video_sample_size,
-                            generator=generator,
-                        ).videos
-                        os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
-                        save_videos_grid(sample, os.path.join(args.output_dir, f"sample/sample-{global_step}-{i}.gif"))
+#                         video_length = 1
+#                         input_video, input_video_mask, clip_image = get_image_to_video_latent(
+#                             None, None, video_length=video_length, sample_size=[args.video_sample_size, args.video_sample_size]
+#                         )
+#                         sample = pipeline(
+#                             args.validation_prompts[i],
+#                             video_length=1,
+#                             negative_prompt="bad detailed",
+#                             height=args.video_sample_size,
+#                             width=args.video_sample_size,
+#                             generator=generator,
+#                             video=input_video,
+#                             mask_video=input_video_mask,
+#                             clip_image=clip_image,
+#                         ).videos
+#                         os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
+#                         save_videos_grid(sample, os.path.join(args.output_dir, f"sample/sample-{global_step}-image-{i}.gif"))
+#                 else:
+#                     with torch.autocast("cuda", dtype=weight_dtype):
+#                         sample = pipeline(
+#                             args.validation_prompts[i],
+#                             video_length=video_length,
+#                             negative_prompt="bad detailed",
+#                             height=args.video_sample_size,
+#                             width=args.video_sample_size,
+#                             generator=generator,
+#                         ).videos
+#                         os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
+#                         save_videos_grid(sample, os.path.join(args.output_dir, f"sample/sample-{global_step}-{i}.gif"))
 
-                        sample = pipeline(
-                            args.validation_prompts[i],
-                            video_length=1,
-                            negative_prompt="bad detailed",
-                            height=args.video_sample_size,
-                            width=args.video_sample_size,
-                            generator=generator,
-                        ).videos
-                        os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
-                        save_videos_grid(sample, os.path.join(args.output_dir, f"sample/sample-{global_step}-image-{i}.gif"))
+#                         sample = pipeline(
+#                             args.validation_prompts[i],
+#                             video_length=1,
+#                             negative_prompt="bad detailed",
+#                             height=args.video_sample_size,
+#                             width=args.video_sample_size,
+#                             generator=generator,
+#                         ).videos
+#                         os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
+#                         save_videos_grid(sample, os.path.join(args.output_dir, f"sample/sample-{global_step}-image-{i}.gif"))
 
-        del pipeline
-        del transformer3d_val
-        gc.collect()
-        torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
+#         del pipeline
+#         del transformer3d_val
+#         gc.collect()
+#         torch.cuda.empty_cache()
+#         torch.cuda.ipc_collect()
 
-        return None
-    except Exception as e:
-        gc.collect()
-        torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
-        print(f"Eval error with info {e}")
-        return None
+#         return None
+#     except Exception as e:
+#         gc.collect()
+#         torch.cuda.empty_cache()
+#         torch.cuda.ipc_collect()
+#         print(f"Eval error with info {e}")
+#         return None
 
 
 def linear_decay(initial_value, final_value, total_steps, current_step):
@@ -1035,10 +1024,12 @@ def main():
     if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
         # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
         def save_model_hook(models, weights, output_dir):
+            easycamera = models[0].module
+
             if accelerator.is_main_process:
-                models.easyanimate.save_pretrained(os.path.join(output_dir, "transformer"), max_shard_size="30GB")
+                easycamera.easyanimate.save_pretrained(os.path.join(output_dir, "transformer"), max_shard_size="30GB")
                 os.makedirs(os.path.join(output_dir, "dav2"), exist_ok=True)
-                torch.save(models.depth_anything_v2.state_dict(), os.path.join(output_dir, "dav2", "depth_anything.pth"))
+                torch.save(easycamera.depth_anything_v2.state_dict(), os.path.join(output_dir, "dav2", "depth_anything.pth"))
 
                 if not args.use_deepspeed:
                     weights.pop()
@@ -1048,7 +1039,19 @@ def main():
 
         # 定义加载钩子函数
         def load_model_hook(models, input_dir):
-            # 确保目录存在并有效
+            # 检查当前是否使用 DeepSpeed
+            if accelerator.distributed_type == DistributedType.DEEPSPEED:
+                # 通过 unwrap_model 获取原始模型实例
+                easycamera = accelerator.unwrap_model(accelerator._models[0].module)
+                accelerator.print("Loading model using DeepSpeed-specific load_model_hook.")
+            else:
+                # 对于非 DeepSpeed 分布式类型，按常规方式处理
+                if len(models) == 0:
+                    accelerator.print("No models to load.")
+                    return
+                easycamera = models[0].module  # 假设 EasyCamera 是第一个模型
+
+            # 确保目录存在
             transformer_dir = os.path.join(input_dir, "transformer")
             depth_dir = os.path.join(input_dir, "dav2")
 
@@ -1057,30 +1060,28 @@ def main():
             if not os.path.exists(depth_dir):
                 raise FileNotFoundError(f"Dav2 directory not found at {depth_dir}")
 
-            # # 解除包装，获取原始 CombinedModel
-            # combined_model = unwrap_model(models.easyanimate, accelerator)  # 根据实际结构调整
-
             # 加载 easyanimate 模型
-            if hasattr(models.easyanimate, "from_pretrained_2d"):
+            if hasattr(easycamera.easyanimate, "from_pretrained_2d"):
                 # 假设 EasyAnimate 有一个自定义的加载方法 from_pretrained_2d
+                Choosen_Transformer3DModel = name_to_transformer3d[config['transformer_additional_kwargs'].get('transformer_type', 'Transformer3DModel')]
                 loaded_easyanimate = Choosen_Transformer3DModel.from_pretrained_2d(
                     transformer_dir, subfolder=".", transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs'])
                 )
-                models.easyanimate.register_to_config(**loaded_easyanimate.config)
-                models.easyanimate.load_state_dict(loaded_easyanimate.state_dict())
+                easycamera.easyanimate.register_to_config(**loaded_easyanimate.config)
+                easycamera.easyanimate.load_state_dict(loaded_easyanimate.state_dict())
                 del loaded_easyanimate  # 释放内存
             else:
                 # 如果 easyanimate 没有 from_pretrained_2d 方法，改用 torch.load
                 easyanimate_state_path = os.path.join(transformer_dir, "easyanimate.pth")
                 if os.path.exists(easyanimate_state_path):
-                    models.easyanimate.load_state_dict(torch.load(easyanimate_state_path, map_location=accelerator.device))
+                    easycamera.easyanimate.load_state_dict(torch.load(easyanimate_state_path, map_location=accelerator.device))
                 else:
                     raise FileNotFoundError(f"EasyAnimate state dict not found at {easyanimate_state_path}")
 
             # 加载 depth_anything_v2 的 state_dict
             depth_state_path = os.path.join(depth_dir, "depth_anything.pth")
             if os.path.exists(depth_state_path):
-                models.depth_anything_v2.load_state_dict(torch.load(depth_state_path, map_location=accelerator.device))
+                easycamera.depth_anything_v2.load_state_dict(torch.load(depth_state_path, map_location=accelerator.device))
             else:
                 raise FileNotFoundError(f"DepthAnything state dict not found at {depth_state_path}")
 
@@ -1606,7 +1607,7 @@ def main():
                     clip_encoder_hidden_states,
                     clip_attention_mask,
                 )
-                if epoch == first_epoch and step == 0:
+                if epoch == first_epoch and step % 100 == 0 and accelerator.is_main_process:
                     save_videos_set(first_frames, depths, mask, mask_warped, mask_pixel_values, pixel_values, os.path.join(args.output_dir, f"sanity_check-{global_step}"))
 
                 if noise_pred.size()[1] != vae.config.latent_channels:
@@ -1632,13 +1633,33 @@ def main():
                 def match_keypoints_loss_fn(warped_points, gt_points):
                     return F.smooth_l1_loss(warped_points, gt_points, reduction='mean', beta=1.0)
 
-                def match_pixel_loss_fn(mask_warped, mask_pixel_values):
+                def match_pixel_loss_fn(mask_warped, mask_pixel_values, mask):
                     if mask_warped.size() != mask_pixel_values.size():
                         raise ValueError("gen_video 和 gt_video 的形状必须一致。")
 
-                    # 直接使用 (gen_video - gt_video)**2 求平均
-                    # 或者也可以使用 torch.nn.functional.mse_loss(mask_warped, mask_pixel_values)
-                    return torch.nn.functional.mse_loss(mask_warped, mask_pixel_values)
+                    # 增加一个通道维度到 mask，使其形状为 [batch, frames, 1, height, width]
+                    mask = mask.unsqueeze(2)  # [batch, frames, 1, height, width]
+
+                    # 创建掩码，只保留 mask 为 0 的位置
+                    mask_zero = (mask == 0).float()  # 转换为浮点数以便后续计算
+
+                    # 计算平方差
+                    squared_diff = (mask_warped - mask_pixel_values) ** 2  # [batch, frames, channels, height, width]
+
+                    # 应用掩码，只保留 mask 为 0 的位置
+                    masked_squared_diff = squared_diff * mask_zero  # [batch, frames, channels, height, width]
+
+                    # 计算总的平方差
+                    total_squared_diff = masked_squared_diff.sum()
+
+                    # 计算有效像素点数量（每个 mask 为 0 的位置在所有通道上计算）
+                    # 如果希望对所有通道求平均，可乘以通道数
+                    effective_pixels = mask_zero.sum() * mask_warped.size(2)  # channels 数量
+
+                    # 防止除以零
+                    loss = total_squared_diff / (effective_pixels + 1e-8)
+
+                    return loss
 
                 diffusion_loss = diffusion_mse_loss(noise_pred.float(), target.float())
 
@@ -1664,13 +1685,14 @@ def main():
 
                 # warped_points, gt_points = get_match_points_from_dust3r(pixel_values, mask_pixel_values, mask)
                 # match_loss = match_keypoints_loss_fn(warped_points, gt_points)
-                match_loss = match_pixel_loss_fn(mask_warped, mask_pixel_values)
+                match_loss = match_pixel_loss_fn(mask_warped, mask_pixel_values, mask)
 
                 loss = (
                     config['loss_weights']['lambda_diffusion'] * diffusion_loss
                     + config['loss_weights']['lambda_pixel'] * pixel_loss
                     + config['loss_weights']['lambda_match'] * match_loss
                 )
+                # print(f"diffusion_loss: {diffusion_loss}, pixel_loss: {pixel_loss}, match_loss: {match_loss}, loss: {loss}")
 
                 # def my_mse_loss(output_latents, target):
                 #     mse_loss = F.mse_loss(output_latents.float(), target.float(), reduction='mean')

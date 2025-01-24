@@ -21,11 +21,11 @@ accelerate launch \
   --video_sample_size=512 \
   --video_sample_stride=4 \
   --video_sample_n_frames=49 \
-  --train_batch_size=2 \
-  --gradient_accumulation_steps=1 \
+  --train_batch_size=1 \
+  --gradient_accumulation_steps=2 \
   --dataloader_num_workers=8 \
   --num_train_epochs=3 \
-  --checkpointing_steps=6778 \
+  --checkpointing_steps=8038 \
   --learning_rate=2e-05 \
   --lr_scheduler="constant_with_warmup" \
   --lr_warmup_steps=100 \
@@ -41,4 +41,4 @@ accelerate launch \
   --uniform_sampling \
   --use_deepspeed \
   --train_mode="inpaint" \
-  --trainable_modules "attn1." "depth_head."
+  --trainable_modules "depth_head." "attn1."

@@ -93,12 +93,7 @@ from easyanimate.data.dataset_inpainting_with_mask import (
 from easyanimate.models import name_to_autoencoder_magvit, name_to_transformer3d
 from easyanimate.pipeline.pipeline_easyanimate import EasyAnimatePipeline
 from easyanimate.pipeline.pipeline_easyanimate_inpaint import EasyAnimateInpaintPipeline
-from easyanimate.pipeline.pipeline_easyanimate_multi_text_encoder import (
-    EasyAnimatePipeline_Multi_Text_Encoder,
-    get_2d_rotary_pos_embed,
-    get_3d_rotary_pos_embed,
-    get_resize_crop_region_for_grid,
-)
+from easyanimate.pipeline.pipeline_easyanimate import get_2d_rotary_pos_embed, get_3d_rotary_pos_embed, get_resize_crop_region_for_grid
 from easyanimate.pipeline.pipeline_easyanimate_multi_text_encoder_inpaint import (
     EasyAnimatePipeline_Multi_Text_Encoder_Inpaint,
     add_noise_to_reference_video,
@@ -234,153 +229,153 @@ check_min_version("0.18.0.dev0")
 logger = get_logger(__name__, log_level="INFO")
 
 
-def log_validation(vae, text_encoder, text_encoder_2, tokenizer, tokenizer_2, transformer3d, image_encoder, image_processor, config, args, accelerator, weight_dtype, global_step):
-    try:
-        logger.info("Running validation... ")
+# def log_validation(vae, text_encoder, text_encoder_2, tokenizer, tokenizer_2, transformer3d, image_encoder, image_processor, config, args, accelerator, weight_dtype, global_step):
+#     try:
+#         logger.info("Running validation... ")
 
-        # Get New Transformer
-        Choosen_Transformer3DModel = name_to_transformer3d[config['transformer_additional_kwargs'].get('transformer_type', 'Transformer3DModel')]
+#         # Get New Transformer
+#         Choosen_Transformer3DModel = name_to_transformer3d[config['transformer_additional_kwargs'].get('transformer_type', 'Transformer3DModel')]
 
-        transformer3d_val = Choosen_Transformer3DModel.from_pretrained_2d(
-            args.pretrained_model_name_or_path, subfolder="transformer", transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs'])
-        ).to(weight_dtype)
-        transformer3d_val.load_state_dict(accelerator.unwrap_model(transformer3d).state_dict())
+#         transformer3d_val = Choosen_Transformer3DModel.from_pretrained_2d(
+#             args.pretrained_model_name_or_path, subfolder="transformer", transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs'])
+#         ).to(weight_dtype)
+#         transformer3d_val.load_state_dict(accelerator.unwrap_model(transformer3d).state_dict())
 
-        if config['text_encoder_kwargs'].get('enable_multi_text_encoder', False):
-            if args.train_mode != "normal":
-                pipeline = EasyAnimatePipeline_Multi_Text_Encoder_Inpaint.from_pretrained(
-                    args.pretrained_model_name_or_path,
-                    vae=accelerator.unwrap_model(vae).to(weight_dtype),
-                    text_encoder=accelerator.unwrap_model(text_encoder),
-                    text_encoder_2=accelerator.unwrap_model(text_encoder_2),
-                    tokenizer=tokenizer,
-                    tokenizer_2=tokenizer_2,
-                    transformer=transformer3d_val,
-                    torch_dtype=weight_dtype,
-                    clip_image_encoder=image_encoder,
-                    clip_image_processor=image_processor,
-                )
-            else:
-                pipeline = EasyAnimatePipeline_Multi_Text_Encoder.from_pretrained(
-                    args.pretrained_model_name_or_path,
-                    vae=accelerator.unwrap_model(vae).to(weight_dtype),
-                    text_encoder=accelerator.unwrap_model(text_encoder),
-                    text_encoder_2=accelerator.unwrap_model(text_encoder_2),
-                    tokenizer=tokenizer,
-                    tokenizer_2=tokenizer_2,
-                    transformer=transformer3d_val,
-                    torch_dtype=weight_dtype,
-                )
-        else:
-            if args.train_mode != "normal":
-                pipeline = EasyAnimateInpaintPipeline.from_pretrained(
-                    args.pretrained_model_name_or_path,
-                    vae=accelerator.unwrap_model(vae).to(weight_dtype),
-                    text_encoder=accelerator.unwrap_model(text_encoder),
-                    tokenizer=tokenizer,
-                    transformer=transformer3d_val,
-                    torch_dtype=weight_dtype,
-                    clip_image_encoder=image_encoder,
-                    clip_image_processor=image_processor,
-                )
-            else:
-                pipeline = EasyAnimatePipeline.from_pretrained(
-                    args.pretrained_model_name_or_path,
-                    vae=accelerator.unwrap_model(vae).to(weight_dtype),
-                    text_encoder=accelerator.unwrap_model(text_encoder),
-                    tokenizer=tokenizer,
-                    transformer=transformer3d_val,
-                    torch_dtype=weight_dtype,
-                )
-        pipeline = pipeline.to(accelerator.device)
+#         if config['text_encoder_kwargs'].get('enable_multi_text_encoder', False):
+#             if args.train_mode != "normal":
+#                 pipeline = EasyAnimatePipeline_Multi_Text_Encoder_Inpaint.from_pretrained(
+#                     args.pretrained_model_name_or_path,
+#                     vae=accelerator.unwrap_model(vae).to(weight_dtype),
+#                     text_encoder=accelerator.unwrap_model(text_encoder),
+#                     text_encoder_2=accelerator.unwrap_model(text_encoder_2),
+#                     tokenizer=tokenizer,
+#                     tokenizer_2=tokenizer_2,
+#                     transformer=transformer3d_val,
+#                     torch_dtype=weight_dtype,
+#                     clip_image_encoder=image_encoder,
+#                     clip_image_processor=image_processor,
+#                 )
+#             else:
+#                 pipeline = EasyAnimatePipeline_Multi_Text_Encoder.from_pretrained(
+#                     args.pretrained_model_name_or_path,
+#                     vae=accelerator.unwrap_model(vae).to(weight_dtype),
+#                     text_encoder=accelerator.unwrap_model(text_encoder),
+#                     text_encoder_2=accelerator.unwrap_model(text_encoder_2),
+#                     tokenizer=tokenizer,
+#                     tokenizer_2=tokenizer_2,
+#                     transformer=transformer3d_val,
+#                     torch_dtype=weight_dtype,
+#                 )
+#         else:
+#             if args.train_mode != "normal":
+#                 pipeline = EasyAnimateInpaintPipeline.from_pretrained(
+#                     args.pretrained_model_name_or_path,
+#                     vae=accelerator.unwrap_model(vae).to(weight_dtype),
+#                     text_encoder=accelerator.unwrap_model(text_encoder),
+#                     tokenizer=tokenizer,
+#                     transformer=transformer3d_val,
+#                     torch_dtype=weight_dtype,
+#                     clip_image_encoder=image_encoder,
+#                     clip_image_processor=image_processor,
+#                 )
+#             else:
+#                 pipeline = EasyAnimatePipeline.from_pretrained(
+#                     args.pretrained_model_name_or_path,
+#                     vae=accelerator.unwrap_model(vae).to(weight_dtype),
+#                     text_encoder=accelerator.unwrap_model(text_encoder),
+#                     tokenizer=tokenizer,
+#                     transformer=transformer3d_val,
+#                     torch_dtype=weight_dtype,
+#                 )
+#         pipeline = pipeline.to(accelerator.device)
 
-        if args.enable_xformers_memory_efficient_attention and config['transformer_additional_kwargs'].get('transformer_type', 'Transformer3DModel') == 'Transformer3DModel':
-            pipeline.enable_xformers_memory_efficient_attention()
+#         if args.enable_xformers_memory_efficient_attention and config['transformer_additional_kwargs'].get('transformer_type', 'Transformer3DModel') == 'Transformer3DModel':
+#             pipeline.enable_xformers_memory_efficient_attention()
 
-        if args.seed is None:
-            generator = None
-        else:
-            generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
+#         if args.seed is None:
+#             generator = None
+#         else:
+#             generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
 
-        for i in range(len(args.validation_prompts)):
-            with torch.no_grad():
-                if args.train_mode != "normal":
-                    with torch.autocast("cuda", dtype=weight_dtype):
-                        if vae.cache_mag_vae:
-                            video_length = int((args.video_sample_n_frames - 1) // vae.mini_batch_encoder * vae.mini_batch_encoder) + 1 if args.video_sample_n_frames != 1 else 1
-                        else:
-                            video_length = int(args.video_sample_n_frames // vae.mini_batch_encoder * vae.mini_batch_encoder) if args.video_sample_n_frames != 1 else 1
-                        input_video, input_video_mask, clip_image = get_image_to_video_latent(
-                            None, None, video_length=video_length, sample_size=[args.video_sample_size, args.video_sample_size]
-                        )
-                        sample = pipeline(
-                            args.validation_prompts[i],
-                            video_length=video_length,
-                            negative_prompt="bad detailed",
-                            height=args.video_sample_size,
-                            width=args.video_sample_size,
-                            generator=generator,
-                            video=input_video,
-                            mask_video=input_video_mask,
-                            clip_image=clip_image,
-                        ).videos
-                        os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
-                        save_videos_grid(sample, os.path.join(args.output_dir, f"sample/sample-{global_step}-{i}.gif"))
+#         for i in range(len(args.validation_prompts)):
+#             with torch.no_grad():
+#                 if args.train_mode != "normal":
+#                     with torch.autocast("cuda", dtype=weight_dtype):
+#                         if vae.cache_mag_vae:
+#                             video_length = int((args.video_sample_n_frames - 1) // vae.mini_batch_encoder * vae.mini_batch_encoder) + 1 if args.video_sample_n_frames != 1 else 1
+#                         else:
+#                             video_length = int(args.video_sample_n_frames // vae.mini_batch_encoder * vae.mini_batch_encoder) if args.video_sample_n_frames != 1 else 1
+#                         input_video, input_video_mask, clip_image = get_image_to_video_latent(
+#                             None, None, video_length=video_length, sample_size=[args.video_sample_size, args.video_sample_size]
+#                         )
+#                         sample = pipeline(
+#                             args.validation_prompts[i],
+#                             video_length=video_length,
+#                             negative_prompt="bad detailed",
+#                             height=args.video_sample_size,
+#                             width=args.video_sample_size,
+#                             generator=generator,
+#                             video=input_video,
+#                             mask_video=input_video_mask,
+#                             clip_image=clip_image,
+#                         ).videos
+#                         os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
+#                         save_videos_grid(sample, os.path.join(args.output_dir, f"sample/sample-{global_step}-{i}.gif"))
 
-                        video_length = 1
-                        input_video, input_video_mask, clip_image = get_image_to_video_latent(
-                            None, None, video_length=video_length, sample_size=[args.video_sample_size, args.video_sample_size]
-                        )
-                        sample = pipeline(
-                            args.validation_prompts[i],
-                            video_length=1,
-                            negative_prompt="bad detailed",
-                            height=args.video_sample_size,
-                            width=args.video_sample_size,
-                            generator=generator,
-                            video=input_video,
-                            mask_video=input_video_mask,
-                            clip_image=clip_image,
-                        ).videos
-                        os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
-                        save_videos_grid(sample, os.path.join(args.output_dir, f"sample/sample-{global_step}-image-{i}.gif"))
-                else:
-                    with torch.autocast("cuda", dtype=weight_dtype):
-                        sample = pipeline(
-                            args.validation_prompts[i],
-                            video_length=video_length,
-                            negative_prompt="bad detailed",
-                            height=args.video_sample_size,
-                            width=args.video_sample_size,
-                            generator=generator,
-                        ).videos
-                        os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
-                        save_videos_grid(sample, os.path.join(args.output_dir, f"sample/sample-{global_step}-{i}.gif"))
+#                         video_length = 1
+#                         input_video, input_video_mask, clip_image = get_image_to_video_latent(
+#                             None, None, video_length=video_length, sample_size=[args.video_sample_size, args.video_sample_size]
+#                         )
+#                         sample = pipeline(
+#                             args.validation_prompts[i],
+#                             video_length=1,
+#                             negative_prompt="bad detailed",
+#                             height=args.video_sample_size,
+#                             width=args.video_sample_size,
+#                             generator=generator,
+#                             video=input_video,
+#                             mask_video=input_video_mask,
+#                             clip_image=clip_image,
+#                         ).videos
+#                         os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
+#                         save_videos_grid(sample, os.path.join(args.output_dir, f"sample/sample-{global_step}-image-{i}.gif"))
+#                 else:
+#                     with torch.autocast("cuda", dtype=weight_dtype):
+#                         sample = pipeline(
+#                             args.validation_prompts[i],
+#                             video_length=video_length,
+#                             negative_prompt="bad detailed",
+#                             height=args.video_sample_size,
+#                             width=args.video_sample_size,
+#                             generator=generator,
+#                         ).videos
+#                         os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
+#                         save_videos_grid(sample, os.path.join(args.output_dir, f"sample/sample-{global_step}-{i}.gif"))
 
-                        sample = pipeline(
-                            args.validation_prompts[i],
-                            video_length=1,
-                            negative_prompt="bad detailed",
-                            height=args.video_sample_size,
-                            width=args.video_sample_size,
-                            generator=generator,
-                        ).videos
-                        os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
-                        save_videos_grid(sample, os.path.join(args.output_dir, f"sample/sample-{global_step}-image-{i}.gif"))
+#                         sample = pipeline(
+#                             args.validation_prompts[i],
+#                             video_length=1,
+#                             negative_prompt="bad detailed",
+#                             height=args.video_sample_size,
+#                             width=args.video_sample_size,
+#                             generator=generator,
+#                         ).videos
+#                         os.makedirs(os.path.join(args.output_dir, "sample"), exist_ok=True)
+#                         save_videos_grid(sample, os.path.join(args.output_dir, f"sample/sample-{global_step}-image-{i}.gif"))
 
-        del pipeline
-        del transformer3d_val
-        gc.collect()
-        torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
+#         del pipeline
+#         del transformer3d_val
+#         gc.collect()
+#         torch.cuda.empty_cache()
+#         torch.cuda.ipc_collect()
 
-        return None
-    except Exception as e:
-        gc.collect()
-        torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
-        print(f"Eval error with info {e}")
-        return None
+#         return None
+#     except Exception as e:
+#         gc.collect()
+#         torch.cuda.empty_cache()
+#         torch.cuda.ipc_collect()
+#         print(f"Eval error with info {e}")
+#         return None
 
 
 def linear_decay(initial_value, final_value, total_steps, current_step):
@@ -1840,30 +1835,30 @@ def main():
                         accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
 
-                if accelerator.is_main_process:
-                    if args.validation_prompts is not None and global_step % args.validation_steps == 0:
-                        if args.use_ema:
-                            # Store the UNet parameters temporarily and load the EMA parameters to perform inference.
-                            ema_transformer3d.store(transformer3d.parameters())
-                            ema_transformer3d.copy_to(transformer3d.parameters())
-                        log_validation(
-                            vae,
-                            text_encoder,
-                            text_encoder_2,
-                            tokenizer,
-                            tokenizer_2,
-                            transformer3d,
-                            image_encoder,
-                            image_processor,
-                            config,
-                            args,
-                            accelerator,
-                            weight_dtype,
-                            global_step,
-                        )
-                        if args.use_ema:
-                            # Switch back to the original transformer3d parameters.
-                            ema_transformer3d.restore(transformer3d.parameters())
+                # if accelerator.is_main_process:
+                #     if args.validation_prompts is not None and global_step % args.validation_steps == 0:
+                #         if args.use_ema:
+                #             # Store the UNet parameters temporarily and load the EMA parameters to perform inference.
+                #             ema_transformer3d.store(transformer3d.parameters())
+                #             ema_transformer3d.copy_to(transformer3d.parameters())
+                #         log_validation(
+                #             vae,
+                #             text_encoder,
+                #             text_encoder_2,
+                #             tokenizer,
+                #             tokenizer_2,
+                #             transformer3d,
+                #             image_encoder,
+                #             image_processor,
+                #             config,
+                #             args,
+                #             accelerator,
+                #             weight_dtype,
+                #             global_step,
+                #         )
+                #         if args.use_ema:
+                #             # Switch back to the original transformer3d parameters.
+                #             ema_transformer3d.restore(transformer3d.parameters())
 
             logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
@@ -1871,30 +1866,30 @@ def main():
             if global_step >= args.max_train_steps:
                 break
 
-        if accelerator.is_main_process:
-            if args.validation_prompts is not None and epoch % args.validation_epochs == 0:
-                if args.use_ema:
-                    # Store the UNet parameters temporarily and load the EMA parameters to perform inference.
-                    ema_transformer3d.store(transformer3d.parameters())
-                    ema_transformer3d.copy_to(transformer3d.parameters())
-                log_validation(
-                    vae,
-                    text_encoder,
-                    text_encoder_2,
-                    tokenizer,
-                    tokenizer_2,
-                    transformer3d,
-                    image_encoder,
-                    image_processor,
-                    config,
-                    args,
-                    accelerator,
-                    weight_dtype,
-                    global_step,
-                )
-                if args.use_ema:
-                    # Switch back to the original transformer3d parameters.
-                    ema_transformer3d.restore(transformer3d.parameters())
+        # if accelerator.is_main_process:
+        #     if args.validation_prompts is not None and epoch % args.validation_epochs == 0:
+        #         if args.use_ema:
+        #             # Store the UNet parameters temporarily and load the EMA parameters to perform inference.
+        #             ema_transformer3d.store(transformer3d.parameters())
+        #             ema_transformer3d.copy_to(transformer3d.parameters())
+        #         log_validation(
+        #             vae,
+        #             text_encoder,
+        #             text_encoder_2,
+        #             tokenizer,
+        #             tokenizer_2,
+        #             transformer3d,
+        #             image_encoder,
+        #             image_processor,
+        #             config,
+        #             args,
+        #             accelerator,
+        #             weight_dtype,
+        #             global_step,
+        #         )
+        #         if args.use_ema:
+        #             # Switch back to the original transformer3d parameters.
+        #             ema_transformer3d.restore(transformer3d.parameters())
 
     # Create the pipeline using the trained modules and save it.
     accelerator.wait_for_everyone()
