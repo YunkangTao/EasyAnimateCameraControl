@@ -30,7 +30,7 @@ accelerate launch \
   --lr_scheduler="constant_with_warmup" \
   --lr_warmup_steps=100 \
   --seed=42 \
-  --output_dir="output_dir_20250123_inpainting_with_depth_attn1_head" \
+  --output_dir="output_dir_20250211_inpainting_with_depth_attn1_head" \
   --gradient_checkpointing \
   --mixed_precision="bf16" \
   --adam_weight_decay=5e-3 \
@@ -41,4 +41,5 @@ accelerate launch \
   --uniform_sampling \
   --use_deepspeed \
   --train_mode="inpaint" \
-  --trainable_modules "depth_head." "attn1."
+  --trainable_modules "depth_head." "attn1." \
+  --resume_from_checkpoint="latest"

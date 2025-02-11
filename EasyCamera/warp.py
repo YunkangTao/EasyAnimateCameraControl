@@ -662,7 +662,7 @@ def get_mask_batch(
     tar_wc = camera_poses[..., 7:].reshape(B, F, 3, 4)
 
     # 统一做相对变换: (B, F, 4, 4)
-    rel_view_mtx = get_rel_view_mtx_batch(src_wc, tar_wc)
+    rel_view_mtx = get_rel_view_mtx_batch(src_wc, tar_wc).to(device=device, dtype=dtype)
 
     # 进行批量 warp，得到 (B, F, 3, H, W) 的 warped 图像
     # 注意：需要令 warp_function 支持一个“额外的帧维度 F”

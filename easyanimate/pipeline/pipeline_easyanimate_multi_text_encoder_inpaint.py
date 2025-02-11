@@ -1264,4 +1264,4 @@ class EasyAnimatePipeline_Multi_Text_Encoder_Inpaint(DiffusionPipeline):
         if not return_dict:
             return video
 
-        return EasyAnimatePipelineOutput(videos=video)
+        return EasyAnimatePipelineOutput(frames=video)
