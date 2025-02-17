@@ -2,10 +2,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from EasyCamera.warp import get_mask_batch
-from einops import rearrange
 import torchvision.transforms as transforms
+from einops import rearrange
 from torch.utils.checkpoint import checkpoint
+
+from EasyCamera.warp import get_mask_batch
 
 
 def _batch_encode_vae(pixel_values, vae, vae_mini_batch, weight_dtype, video_length):
@@ -249,11 +250,13 @@ def get_inpaint_latents_from_depth(
     # mask_latents2 = resize_latents(mask_latents2_reshape, latents, vae.cache_mag_vae)  # torch.Size([1, 16, 13, 64, 64])
     # _, _, _, latents_h, latents_w = latents.shape
     # depths_reshape = F.interpolate(depths.unsqueeze(1), (latents_h, latents_w), mode="bilinear", align_corners=True).squeeze(1)  # torch.Size([1, 64, 64])
+    # print("max value of latents: ", latents.max())
+    # print("min value of latents: ", latents.min())
     latents_first_frame = latents[:, :, 0:1, :, :].squeeze(2)  # torch.Size([1, 16, 64, 64])
     latents_first_frame = F.interpolate(latents_first_frame, (video_sample_size, video_sample_size), mode="bilinear", align_corners=True)  # torch.Size([1, 16, 512, 512])
     latents_first_frame = (latents_first_frame * 0.5 + 0.5).clamp(0, 1) * 255.0  # torch.Size([1, 16, 512, 512])
-    latents_first_frame = latents_first_frame.permute(0, 2, 3, 1).to(torch.float32)
-    _, mask_latents3 = get_mask_batch(latents_first_frame, depths, camera_poses, ori_hs, ori_ws, video_sample_size)  # torch.Size([1, 49, 16, 512, 512])
+    latents_first_frame = latents_first_frame.permute(0, 2, 3, 1).to(torch.float32)  # torch.Size([1, 512, 512, 16])
+    mask_latent, mask_latents3 = get_mask_batch(latents_first_frame, depths, camera_poses, ori_hs, ori_ws, video_sample_size)  # torch.Size([1, 49, 16, 512, 512])
     mask_latents3 = mask_latents3.permute(0, 2, 1, 3, 4)  # torch.Size([1, 16, 49, 512, 512])
     mask_latents3 = (mask_latents3 / 255.0 - 0.5) * 2.0  # torch.Size([1, 16, 49, 512, 512])
     mask_latents3 = resize_mask(mask_latents3, latents, vae.cache_mag_vae).to(accelerator_device, dtype=weight_dtype)  # torch.Size([1, 16, 13, 64, 64])
@@ -268,7 +271,7 @@ def get_inpaint_latents_from_depth(
     # 按照 VAE scaling_factor 进行缩放
     inpaint_latents = inpaint_latents * vae.config.scaling_factor
 
-    return inpaint_latents, mask_pixel_values, mask, mask_warped
+    return inpaint_latents, mask_pixel_values, mask, mask_latent, mask_warped
 
 
 def pre_process_first_frames(first_frames, device, dtype, input_size=518):
@@ -332,7 +335,7 @@ class EasyCamera(nn.Module):
         depths = self.depth_anything_v2.forward(first_frames_processed)  # torch.Size([2, 518, 518])
         depths = F.interpolate(depths.unsqueeze(1), (h, w), mode="bilinear", align_corners=True).squeeze(1)  # torch.Size([2, 512, 512])
 
-        inpaint_latents, mask_pixel_values, mask, mask_warped = get_inpaint_latents_from_depth(
+        inpaint_latents, mask_pixel_values, mask, mask_latent, mask_warped = get_inpaint_latents_from_depth(
             depths,
             first_frames,
             camera_poses,
@@ -365,4 +368,4 @@ class EasyCamera(nn.Module):
             return_dict=False,
         )[0]
 
-        return (noise_pred, first_frames, depths, mask, mask_warped, mask_pixel_values, pixel_values)
+        return (noise_pred, first_frames, depths, mask, mask_latent, mask_warped, mask_pixel_values, pixel_values)

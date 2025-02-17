@@ -25,13 +25,14 @@
 
 import argparse
 import gc
+import itertools
 import logging
 import math
 import os
 import pickle
 import shutil
 import sys
-import itertools
+
 import accelerate
 import diffusers
 import numpy as np
@@ -94,7 +95,11 @@ from easyanimate.data.dataset_inpainting_with_depth import (
     VideoSamplerWithDepth,
 )
 from easyanimate.models import name_to_autoencoder_magvit, name_to_transformer3d
-from easyanimate.pipeline.pipeline_easyanimate import get_2d_rotary_pos_embed, get_3d_rotary_pos_embed, get_resize_crop_region_for_grid
+from easyanimate.pipeline.pipeline_easyanimate import (
+    get_2d_rotary_pos_embed,
+    get_3d_rotary_pos_embed,
+    get_resize_crop_region_for_grid,
+)
 from easyanimate.utils import gaussian_diffusion as gd
 from easyanimate.utils.discrete_sampler import DiscreteSampling
 from easyanimate.utils.respace import SpacedDiffusion, space_timesteps
@@ -1582,7 +1587,7 @@ def main():
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
                 # Predict the noise residual
-                noise_pred, first_frames, depths, mask, mask_warped, mask_pixel_values, pixel_values = easycamera(
+                noise_pred, first_frames, depths, mask, mask_latent, mask_warped, mask_pixel_values, pixel_values = easycamera(
                     first_frames,
                     camera_poses,
                     ori_hs,
@@ -1607,8 +1612,10 @@ def main():
                     clip_encoder_hidden_states,
                     clip_attention_mask,
                 )
-                if epoch == first_epoch and step % 100 == 0 and accelerator.is_main_process:
-                    save_videos_set(first_frames, depths, mask, mask_warped, mask_pixel_values, pixel_values, os.path.join(args.output_dir, f"sanity_check-{global_step}"))
+                # if epoch == first_epoch and step % 100 == 0 and accelerator.is_main_process:
+                #     save_videos_set(
+                #         first_frames, depths, mask, mask_latent, mask_warped, mask_pixel_values, pixel_values, os.path.join(args.output_dir, f"sanity_check-{global_step}")
+                #     )
 
                 if noise_pred.size()[1] != vae.config.latent_channels:
                     noise_pred, _ = noise_pred.chunk(2, dim=1)
