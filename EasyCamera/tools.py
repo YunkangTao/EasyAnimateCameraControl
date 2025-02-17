@@ -48,7 +48,6 @@ def save_videos_set(
     first_frames: torch.Tensor,  # [B, 512, 512, 3], 值域 [0,255]
     depths: torch.Tensor,  # [B, 512, 512], 值域 [0,80]
     mask: torch.Tensor,  # [B, 49, 512, 512], 值域 {0,1}
-    mask_latent: torch.Tensor,  # [B, 49, 512, 512], 值域 [-1,1]
     mask_warped: torch.Tensor,  # [B, 49, 3, 512, 512], 值域 [-1,1]
     mask_pixel_values: torch.Tensor,  # [B, 49, 3, 512, 512], 值域 [-1,1]
     pixel_values: torch.Tensor,  # [B, 49, 3, 512, 512], 值域 [-1,1]
@@ -62,7 +61,6 @@ def save_videos_set(
         first_frames: torch.Size([B, 512, 512, 3]), 取值范围为 [0,255]
         depths: torch.Size([B, 512, 512]), 取值范围 [0,80]
         mask: torch.Size([B, 49, 512, 512]), 取值范围为 {0,1}
-        mask_latent: torch.Size([B, 49, 512, 512]), 取值范围 [-1,1]
         warped: torch.Size([B, 49, 3, 512, 512]), 取值范围 [0,255]
         mask_pixel_values: torch.Size([B, 49, 3, 512, 512]), 取值范围 [-1,1]
         pixel_values: torch.Size([B, 49, 3, 512, 512]), 取值范围 [-1,1]
@@ -110,39 +108,27 @@ def save_videos_set(
         mask_array = np.stack([_to_3channels(x) for x in mask_i], axis=0)
         # shape: [T,512,512,3]
 
-        # (d) mask_latent[i] -> shape [49,512,512], 值域 [-1,1]
-        #     转为 [T,512,512], 再乘 255，变 3 通道
-        mask_latent_i = mask_latent[i]  # [49,512,512]
-        mask_latent_i = (mask_i * 255).astype(np.uint8)  # [T,512,512]
-        mask_latent_array = np.stack([_to_3channels(x) for x in mask_latent_i], axis=0)
-        # shape: [T,512,512,3]
-
-        # (e) warped[i] -> shape [49,3,512,512], 值域 [-1,1]
+        # (d) warped[i] -> shape [49,3,512,512], 值域 [-1,1]
         #     先归一化到 [0,255], 再转 [T,512,512,3]
         warped_i = warped_np[i]  # [49,3,512,512]
         warped_i = _normalize_img(warped_i, -1, 1)
         warped_i = np.transpose(warped_i, (0, 2, 3, 1))  # [T,512,512,3]
 
-        # (f) mask_pixel_values[i] -> shape [49,3,512,512], 值域 [-1,1]
+        # (e) mask_pixel_values[i] -> shape [49,3,512,512], 值域 [-1,1]
         #     先归一化到 [0,255], 再转 [T,512,512,3]
         mpv_i = mask_pixel_values_np[i]  # [49,3,512,512]
         mpv_i = _normalize_img(mpv_i, -1, 1)
         mpv_i = np.transpose(mpv_i, (0, 2, 3, 1))  # [T,512,512,3]
 
-        # (g) pixel_values[i] -> 同样处理
+        # (f) pixel_values[i] -> 同样处理
         pv_i = pixel_values_np[i]  # [49,3,512,512]
         pv_i = _normalize_img(pv_i, -1, 1)
         pv_i = np.transpose(pv_i, (0, 2, 3, 1))  # [T,512,512,3]
 
-        # (h) 纯黑色背景
-        black_bg = np.zeros((512, 512, 3), dtype=np.uint8)
-        black_bg = np.tile(black_bg[None, ...], (T, 1, 1, 1))
-        # shape: [T, 512, 512, 3]
-
         # 2) 创建 VideoWriter
         #   单帧拼接后分辨率： 高度 = 2*512, 宽度 = 3*512
         out_h = 2 * 512
-        out_w = 4 * 512
+        out_w = 3 * 512
 
         video_index = start_index + i
         video_fn = os.path.join(save_path, f"video_{video_index}.mp4")
@@ -151,9 +137,9 @@ def save_videos_set(
         # 3) 拼帧并写入视频
         for t in range(T):
             # row1: [first_frame, depth_map, mask]
-            row1 = np.concatenate([first_frame_array[t], depth_map_array[t], mask_array[t], mask_latent_array[t]], axis=1)
+            row1 = np.concatenate([first_frame_array[t], depth_map_array[t], mask_array[t]], axis=1)
             # row2: [warped, mask_pixel_values, pixel_values]
-            row2 = np.concatenate([warped_i[t], mpv_i[t], pv_i[t], black_bg], axis=1)
+            row2 = np.concatenate([warped_i[t], mpv_i[t], pv_i[t]], axis=1)
             # 拼成 2 行
             frame = np.concatenate([row1, row2], axis=0)  # shape: (1024, 1536, 3)
 

@@ -1587,7 +1587,7 @@ def main():
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
                 # Predict the noise residual
-                noise_pred, first_frames, depths, mask, mask_latent, mask_warped, mask_pixel_values, pixel_values = easycamera(
+                noise_pred, first_frames, depths, mask, mask_warped, mask_pixel_values, pixel_values = easycamera(
                     first_frames,
                     camera_poses,
                     ori_hs,
@@ -1612,10 +1612,8 @@ def main():
                     clip_encoder_hidden_states,
                     clip_attention_mask,
                 )
-                # if epoch == first_epoch and step % 100 == 0 and accelerator.is_main_process:
-                #     save_videos_set(
-                #         first_frames, depths, mask, mask_latent, mask_warped, mask_pixel_values, pixel_values, os.path.join(args.output_dir, f"sanity_check-{global_step}")
-                #     )
+                if epoch == first_epoch and step % 100 == 0 and accelerator.is_main_process:
+                    save_videos_set(first_frames, depths, mask, mask_warped, mask_pixel_values, pixel_values, os.path.join(args.output_dir, f"sanity_check-{global_step}"))
 
                 if noise_pred.size()[1] != vae.config.latent_channels:
                     noise_pred, _ = noise_pred.chunk(2, dim=1)
