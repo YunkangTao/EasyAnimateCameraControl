@@ -1,9 +1,9 @@
 export MODEL_NAME="models/Diffusion_Transformer/EasyAnimateV5-7b-zh-InP"
 export DATASET_NAME="/mnt/chenyang_lei/Datasets/easyanimate_dataset"
-export DATASET_META_NAME="/mnt/chenyang_lei/Datasets/easyanimate_dataset/realestate_dataset/metadata.json"
+export DATASET_META_NAME="/mnt/chenyang_lei/Datasets/easyanimate_dataset/realestate_dataset/metadata_for_debug.json"
 export NCCL_IB_DISABLE=1
 export NCCL_P2P_DISABLE=1
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=4
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 NCCL_DEBUG=INFO
 
@@ -30,7 +30,7 @@ accelerate launch \
   --lr_scheduler="constant_with_warmup" \
   --lr_warmup_steps=100 \
   --seed=42 \
-  --output_dir="output_dir_20250211_inpainting_with_depth_test" \
+  --output_dir="output_dir_20250217_inpainting_with_depth_test" \
   --gradient_checkpointing \
   --mixed_precision="bf16" \
   --adam_weight_decay=5e-3 \

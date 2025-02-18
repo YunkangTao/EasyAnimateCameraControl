@@ -198,7 +198,7 @@ class EasyCamera(nn.Module):
         super().__init__()
         self.easyanimate = easyanimate
         self.depth_anything_v2 = depth_anything_v2
-        self.channel_change = nn.Conv3d(in_channels=3, out_channels=3, kernel_size=(1, 1, 1), stride=(1, 1, 1), padding=(0, 0, 0), bias=False)
+        self.channel_change = nn.Conv3d(in_channels=3, out_channels=16, kernel_size=(1, 1, 1), stride=(1, 1, 1), padding=(0, 0, 0), bias=False)
 
     def get_inpaint_latents_from_depth(
         self,

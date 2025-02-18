@@ -442,7 +442,7 @@ class VideoDatasetWithDepth(Dataset):
             # batch_index = np.linspace(start_idx, start_idx + clip_length - 1, min_sample_n_frames, dtype=int)
 
             batch_index = sample_video_frames(self.video_sample_n_frames, self.video_sample_stride, len(video_reader), self.video_length_drop_start, self.video_length_drop_end)
-
+            # batch_index = [i for i in range(49)]
             try:
                 sample_args = (video_reader, batch_index)
                 pixel_values = func_timeout(VIDEO_READER_TIMEOUT, get_video_reader_batch, args=sample_args)

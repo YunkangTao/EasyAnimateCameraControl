@@ -204,6 +204,8 @@ def get_rel_view_mtx_batch(
     tar_wc_4x4 = tar_wc_4x4.view(B * F, 4, 4)  # 先展平
     tar_wc_4x4[:, :3, :4] = tar_wc_extr
     tar_wc_4x4 = tar_wc_4x4.view(B, F, 4, 4)
+    # print(tar_wc_4x4)
+    # exit()
 
     # 3. 求逆: T1_inv => (B, 4, 4)
     T1_inv = torch.inverse(src_wc_4x4)
@@ -517,7 +519,7 @@ def warp_function_batch(
     # 原 warp_function 做法：先在 (H, W) 构建 grid，再 pad => z=0, w=1
     grid = torch.stack(torch.meshgrid(torch.arange(W, device=device, dtype=dtype), torch.arange(H, device=device, dtype=dtype), indexing='xy'), dim=-1)  # (W, H, 2)
     # 变成 (H, W, 2)
-    grid = grid.permute(1, 0, 2).contiguous()  # (H, W, 2)
+    # grid = grid.permute(1, 0, 2).contiguous()  # (H, W, 2)
 
     # 在原函数中：  screen => (B, H, W, 4)
     screen = F.pad(grid, (0, 1), 'constant', 0)  # (H, W, 3), z=0
@@ -596,6 +598,11 @@ def warp_function_batch(
 
     # pcd => eye_bf => (BF, H*W, 4)
     # 调用 forward_warper
+    # print(input_image_bf.shape)
+    # print(screen_2d_bf.shape)
+    # print(eye_bf.shape)
+    # print(mvp_mtx_bf.shape)
+    # print(viewport_mtx_bf.shape)
     output = forward_warper(image=input_image_bf, screen=screen_2d_bf, pcd=eye_bf, mvp_mtx=mvp_mtx_bf, viewport_mtx=viewport_mtx_bf, alpha=0.5)  # 或你使用的其它超参
     warped_bf = output['warped']  # (BF, C_out, H, W)
     # 其中 C_out = embed大小 + src_image 通道数；最后几通道才是图像
@@ -654,6 +661,7 @@ def get_mask_batch(
     # 分批算出投影矩阵 (B, 4, 4)
     src_proj_mtx = get_src_proj_mtx_batch(focal_length_x, focal_length_y, ori_hs, ori_ws, res, first_frames_t)
     tar_proj_mtx = src_proj_mtx  # 目前源与目标相同
+    # print(src_proj_mtx)
 
     # --------------------------
     # 3. 为所有帧一次性计算相对外参，并做批量 Warp
@@ -663,6 +671,8 @@ def get_mask_batch(
 
     # 统一做相对变换: (B, F, 4, 4)
     rel_view_mtx = get_rel_view_mtx_batch(src_wc, tar_wc).to(device=device, dtype=dtype)
+    # print(rel_view_mtx)
+    # exit()
 
     # 进行批量 warp，得到 (B, F, 3, H, W) 的 warped 图像
     # 注意：需要令 warp_function 支持一个“额外的帧维度 F”

@@ -3,6 +3,7 @@ import os
 import cv2
 import torch
 import numpy as np
+import matplotlib.cm
 
 
 def _normalize_img(img_tensor: np.ndarray, min_val=-1, max_val=1) -> np.ndarray:
@@ -17,15 +18,78 @@ def _normalize_img(img_tensor: np.ndarray, min_val=-1, max_val=1) -> np.ndarray:
     return img_tensor.astype(np.uint8)
 
 
-def _depth_to_gray(depth_tensor: np.ndarray, depth_min=0, depth_max=80) -> np.ndarray:
+def colorize(value, vmin=None, vmax=None, cmap='magma_r', invalid_val=-99, invalid_mask=None, background_color=(128, 128, 128, 255), gamma_corrected=False, value_transform=None):
+    """Converts a depth map to a color image.
+
+    Args:
+        value (torch.Tensor or np.ndarray): Input depth map. Shape: (H, W) or (1, H, W) or (1, 1, H, W).
+        vmin (float, optional): vmin-valued entries are mapped to the start color of cmap.
+                                If None, value.min() is used (通过百分位数计算). Defaults to None.
+        vmax (float, optional): vmax-valued entries are mapped to the end color of cmap.
+                                If None, value.max() is used (通过百分位数计算). Defaults to None.
+        cmap (str, optional): matplotlib colormap to use. Defaults to 'magma_r'.
+        invalid_val (int, optional): 指定无效的像素值，这部分像素会上色为背景色。 Defaults to -99.
+        invalid_mask (np.ndarray, optional): 无效区域的布尔掩模。 Defaults to None.
+        background_color (tuple[int], optional): 无效像素的背景颜色（RGBA）。 Defaults to (128, 128, 128, 255).
+        gamma_corrected (bool, optional): 是否对结果进行 gamma 校正。 Defaults to False.
+        value_transform (Callable, optional): 对有效像素进行变换的函数。 Defaults to None.
+
+    Returns:
+        np.ndarray: 颜色化的深度图，数据类型为 uint8，形状为 (H, W, 4)。
     """
-    将深度 [0,80] 映射到 [0,255] 的灰度图
-    depth_tensor: shape [H, W] 或 [T, H, W]
+    if isinstance(value, torch.Tensor):
+        value = value.detach().cpu().numpy()
+    value = value.squeeze()
+    if invalid_mask is None:
+        invalid_mask = value == invalid_val
+    mask = np.logical_not(invalid_mask)
+
+    # 根据有效像素计算归一化范围（也可以使用显式传入的 vmin/vmax）
+    vmin = np.percentile(value[mask], 2) if vmin is None else vmin
+    vmax = np.percentile(value[mask], 85) if vmax is None else vmax
+
+    if vmin != vmax:
+        norm_value = (value - vmin) / (vmax - vmin)
+    else:
+        norm_value = value * 0.0
+
+    # 对无效值设置为 NaN
+    norm_value[invalid_mask] = np.nan
+    cmapper = matplotlib.cm.get_cmap(cmap)
+    if value_transform:
+        norm_value = value_transform(norm_value)
+    colored = cmapper(norm_value, bytes=True)  # 得到 (H, W, 4) 的 RGBA 图像
+    colored[invalid_mask] = background_color
+
+    if gamma_corrected:
+        colored = colored / 255.0
+        colored = np.power(colored, 2.2)
+        colored = colored * 255
+    return colored.astype(np.uint8)
+
+
+def _depth_to_gray(depth_tensor: np.ndarray, depth_min=0, depth_max=80, cmap='magma_r') -> np.ndarray:
     """
-    depth_tensor = (depth_tensor - depth_min) / (depth_max - depth_min + 1e-8)
-    depth_tensor = np.clip(depth_tensor, 0, 1) * 255
-    depth_tensor = depth_tensor.astype(np.uint8)
-    return depth_tensor
+    将深度图映射为彩色图。
+
+    原本该函数仅做归一化和灰度映射，这里改为调用 colorize()，使用指定的 colormap，生成 RGB 彩色图。
+
+    Args:
+        depth_tensor (np.ndarray): 深度图，形状 (H, W)，值域一般为 [depth_min, depth_max]。
+        depth_min (float, optional): 最小深度值。 Defaults to 0.
+        depth_max (float, optional): 最大深度值。 Defaults to 80.
+        cmap (str, optional): 使用的 matplotlib colormap。 Defaults to 'magma_r'.
+
+    Returns:
+        np.ndarray: 颜色化后的深度图，形状 (H, W, 3)，类型为 uint8。
+    """
+    # 限定深度范围
+    depth_tensor = np.clip(depth_tensor, depth_min, depth_max)
+    # 使用 colorize 生成颜色映射，显式传入 vmin 和 vmax
+    colored_depth = colorize(depth_tensor, vmin=depth_min, vmax=depth_max, cmap=cmap)
+    # colorize 返回 RGBA (4 通道)，这里只保留 RGB 三通道
+    colored_depth = colored_depth[..., :3]
+    return colored_depth
 
 
 def _to_3channels(img_tensor: np.ndarray) -> np.ndarray:
@@ -96,8 +160,9 @@ def save_videos_set(
         # shape: [T, 512, 512, 3]
 
         # (b) depths[i] (仅 1 帧) -> 复制 T 次，并转为灰度 3 通道
-        depth_gray = _depth_to_gray(depths_np[i])  # [512,512] -> [0,255]
-        depth_map_array = np.tile(depth_gray[None, ...], (T, 1, 1))  # [T,512,512]
+        # depth_gray = _depth_to_gray(depths_np[i])  # [512,512] -> [0,255]
+        depth_color = _depth_to_gray(depths_np[i])  # [512,512,3]
+        depth_map_array = np.tile(depth_color[None, ...], (T, 1, 1, 1))  # [T,512,512,3]
         depth_map_array = np.stack([_to_3channels(x) for x in depth_map_array], axis=0)
         # shape: [T,512,512,3]
 
