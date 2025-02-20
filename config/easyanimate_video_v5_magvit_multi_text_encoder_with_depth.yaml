@@ -19,10 +19,10 @@ text_encoder_kwargs:
   enable_multi_text_encoder: true
 
 depth_anything_kwargs:
-  dav2_model: vits
+  dav2_model: vitl
   dav2_outdoor: true
 
 loss_weights:
-  lambda_diffusion: 0.85
-  lambda_pixel: 0.1
-  lambda_match: 0.05
+  lambda_diffusion: 0
+  lambda_pixel: 1
+  lambda_match: 0

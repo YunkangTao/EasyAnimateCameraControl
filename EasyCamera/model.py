@@ -9,54 +9,54 @@ from torch.utils.checkpoint import checkpoint
 from EasyCamera.warp import get_mask_batch
 
 
-def _batch_encode_vae(pixel_values, vae, vae_mini_batch, weight_dtype, video_length):
-    """
-    将原先的内嵌函数独立出来，做小幅优化。
-    """
-    for param in vae.parameters():
-        param.requires_grad = False
+# def _batch_encode_vae(pixel_values, vae, vae_mini_batch, weight_dtype, video_length):
+#     """
+#     将原先的内嵌函数独立出来，做小幅优化。
+#     """
+#     for param in vae.parameters():
+#         param.requires_grad = False
 
-    # 封装 VAE 前向计算逻辑，注意：此处不要在内部使用 torch.no_grad()
-    def vae_forward(x):
-        # 根据具体情况选择调用方式
-        latent_out = vae.encode(x)
-        if hasattr(latent_out, "latent_dist"):
-            return latent_out.latent_dist.sample()
-        else:
-            # 假设返回的是一个 tuple，此时取第一个元素
-            return latent_out[0].sample()
+#     # 封装 VAE 前向计算逻辑，注意：此处不要在内部使用 torch.no_grad()
+#     def vae_forward(x):
+#         # 根据具体情况选择调用方式
+#         latent_out = vae.encode(x)
+#         if hasattr(latent_out, "latent_dist"):
+#             return latent_out.latent_dist.sample()
+#         else:
+#             # 假设返回的是一个 tuple，此时取第一个元素
+#             return latent_out[0].sample()
 
-    # pixel_values: (B, F, 3, 512, 512) or (B, F, C, H, W)
-    # VAE 可能有 5 维的卷积权重（3D VAE），也可能是普通 4 维 ...
-    if vae.quant_conv is None or (vae.quant_conv.weight is not None and vae.quant_conv.weight.ndim == 5):
-        # 3D VAE 的情况
-        pixel_values = rearrange(pixel_values, "b f c h w -> b c f h w")
-        bs = vae_mini_batch
-        outputs = []
-        for i in range(0, pixel_values.shape[0], bs):
-            pv_bs = pixel_values[i : i + bs]
-            # latent_dist = vae.encode(pv_bs)[0]  # (bs, c, f, h, w)
-            # latent_sample = latent_dist.sample()
-            # 利用 checkpoint 进行前向计算（checkpoint 要求输入必须具有 requires_grad，并且计算过程不能有显式使用 no_grad）
-            latent_sample = checkpoint(vae_forward, pv_bs)
-            outputs.append(latent_sample)
-        latents = torch.cat(outputs, dim=0)
-    else:
-        # 常规 2D VAE 的情况
-        # 先合并 B 和 F 为 BF
-        pixel_values = rearrange(pixel_values, "b f c h w -> (b f) c h w")
-        bs = vae_mini_batch
-        outputs = []
-        for i in range(0, pixel_values.shape[0], bs):
-            pv_bs = pixel_values[i : i + bs].to(dtype=weight_dtype)
-            # latent_dist = vae.encode(pv_bs).latent_dist
-            # latent_sample = latent_dist.sample()
-            latent_sample = checkpoint(vae_forward, pv_bs)
-            outputs.append(latent_sample)
-        latents = torch.cat(outputs, dim=0)  # (B*F, C', H', W')
-        # 再恢复到 (B, C', F, H', W')
-        latents = rearrange(latents, "(b f) c h w -> b c f h w", f=video_length)
-    return latents
+#     # pixel_values: (B, F, 3, 512, 512) or (B, F, C, H, W)
+#     # VAE 可能有 5 维的卷积权重（3D VAE），也可能是普通 4 维 ...
+#     if vae.quant_conv is None or (vae.quant_conv.weight is not None and vae.quant_conv.weight.ndim == 5):
+#         # 3D VAE 的情况
+#         pixel_values = rearrange(pixel_values, "b f c h w -> b c f h w")
+#         bs = vae_mini_batch
+#         outputs = []
+#         for i in range(0, pixel_values.shape[0], bs):
+#             pv_bs = pixel_values[i : i + bs]
+#             # latent_dist = vae.encode(pv_bs)[0]  # (bs, c, f, h, w)
+#             # latent_sample = latent_dist.sample()
+#             # 利用 checkpoint 进行前向计算（checkpoint 要求输入必须具有 requires_grad，并且计算过程不能有显式使用 no_grad）
+#             latent_sample = checkpoint(vae_forward, pv_bs)
+#             outputs.append(latent_sample)
+#         latents = torch.cat(outputs, dim=0)
+#     else:
+#         # 常规 2D VAE 的情况
+#         # 先合并 B 和 F 为 BF
+#         pixel_values = rearrange(pixel_values, "b f c h w -> (b f) c h w")
+#         bs = vae_mini_batch
+#         outputs = []
+#         for i in range(0, pixel_values.shape[0], bs):
+#             pv_bs = pixel_values[i : i + bs].to(dtype=weight_dtype)
+#             # latent_dist = vae.encode(pv_bs).latent_dist
+#             # latent_sample = latent_dist.sample()
+#             latent_sample = checkpoint(vae_forward, pv_bs)
+#             outputs.append(latent_sample)
+#         latents = torch.cat(outputs, dim=0)  # (B*F, C', H', W')
+#         # 再恢复到 (B, C', F, H', W')
+#         latents = rearrange(latents, "(b f) c h w -> b c f h w", f=video_length)
+#     return latents
 
 
 def resize_mask(
@@ -193,122 +193,163 @@ def pre_process_first_frames(first_frames, device, dtype, input_size=518):
     return frames, original_hw
 
 
+def get_inpaint_latents_from_depth(
+    depths: torch.Tensor,  # (B, 512, 512)
+    first_frames: torch.Tensor,  # (B, 512, 512, 3)
+    camera_poses: torch.Tensor,  # (B, F, 19)
+    ori_hs: torch.Tensor,  # (B,)
+    ori_ws: torch.Tensor,  # (B,)
+    video_sample_size: int,  # 512
+    pixel_values: torch.Tensor,  # (B, F, 3, 512, 512)
+    weight_dtype,
+    accelerator_device,
+    latents: torch.Tensor,  # (B, 16, 13, 64, 64)
+    vae,
+    vae_mini_batch: int,  # 1
+    video_length: int,  # 49
+):
+    """
+    新的函数去除了对 batch_size 的显式循环，并对部分操作做了矢量化提升。
+    """
+    # 1. 批量计算 mask: (B, F, H, W)
+    mask, warped = get_mask_batch(first_frames, depths, camera_poses, ori_hs, ori_ws, video_sample_size)  # => torch.Size([1, 49, 512, 512]), torch.Size([1, 49, 3, 512, 512])
+
+    # 注意 pixel_values 形状为 (B, F, 3, 512, 512)
+    # 与 mask (B, F, 512, 512) 广播时，需要在通道维度上做扩展
+    mask_for_pixel = mask.unsqueeze(2)  # torch.Size([1, 49, 1, 512, 512])
+
+    # 2. 生成 inpaint 像素：被 mask 的位置替换为 -1，其它使用原值
+    mask_pixel_values = pixel_values * (1 - mask_for_pixel) + (-1) * mask_for_pixel  # torch.Size([1, 49, 3, 512, 512])
+
+    video_transforms = transforms.Compose(
+        [
+            transforms.Resize(video_sample_size),
+            transforms.CenterCrop((video_sample_size, video_sample_size)),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=False),
+        ]
+    )
+
+    warped = warped / 255.0
+    warped = video_transforms(warped)  # torch.Size([1, 49, 3, 512, 512])
+
+    mask_warped = warped * (1 - mask_for_pixel) + (-1) * mask_for_pixel
+    mask_warped = mask_warped.to(accelerator_device, dtype=weight_dtype)  # torch.Size([1, 49, 3, 512, 512])
+
+    # 3. 处理 t2v_flag 的逻辑
+    # 原代码:
+    #     t2v_flag = [(_mask == 1).all() for _mask in mask]
+    #     for _mask in t2v_flag:
+    #         if _mask and np.random.rand() < 0.90: ...
+    #
+    # 这里矢量化：
+    #    先判断整段 mask 是否全部为 1
+    #    rand < 0.9 时则置 0，否则置 1
+    #
+    # mask => (B, F, H, W)
+    # (mask == 1).all(dim=(1,2,3)) => (B,) 表示该 batch 下所有像素都为 1 的布尔值
+    mask_all_ones = (mask == 1).reshape(mask.shape[0], -1).all(dim=1)  # (B,)
+    rand_values = torch.rand_like(mask_all_ones.float())
+    # 当 mask_all_ones=True 且 rand<0.9 => flag=0，否则=1
+    t2v_flag = torch.where(
+        (mask_all_ones & (rand_values < 0.9)),
+        torch.zeros_like(mask_all_ones, dtype=mask_all_ones.dtype),
+        torch.ones_like(mask_all_ones, dtype=mask_all_ones.dtype),
+    )
+    # 转到指定设备
+    t2v_flag = t2v_flag.to(accelerator_device, dtype=weight_dtype)
+
+    # 4. 编码 mask，本质上就是 1-mask 并缩放到与 latents 同尺寸
+    #    先把 mask 从 (B, F, H, W) -> (B, 1, F, H, W)
+    mask_reshape = rearrange(mask, "b f h w -> b 1 f h w")  # torch.Size([1, 1, 49, 512, 512])
+    mask_reshape = 1 - mask_reshape
+    mask_reshape = resize_mask(mask_reshape, latents, vae.cache_mag_vae)  # torch.Size([1, 1, 13, 64, 64])
+
+    # 5. 可选：对原视频添加噪声
+    mask_pixel_values_with_noise = add_noise_to_reference_video(mask_warped)  # torch.Size([1, 49, 3, 512, 512])
+    # mask_pixel_values_with_noise = mask_warped  # torch.Size([1, 49, 3, 512, 512])
+
+    # 6. 编码 inpaint latents：将 mask_pixel_values 传进 VAE 得到 mask_latents
+    with torch.no_grad():
+
+        def _batch_encode_vae(pixel_values):
+            if vae.quant_conv is None or vae.quant_conv.weight.ndim == 5:
+                pixel_values = rearrange(pixel_values, "b f c h w -> b c f h w")
+                bs = vae_mini_batch
+                new_pixel_values = []
+                for i in range(0, pixel_values.shape[0], bs):
+                    pixel_values_bs = pixel_values[i : i + bs]
+                    pixel_values_bs = vae.encode(pixel_values_bs)[0]
+                    pixel_values_bs = pixel_values_bs.sample()
+                    new_pixel_values.append(pixel_values_bs)
+                latents = torch.cat(new_pixel_values, dim=0)
+            else:
+                pixel_values = rearrange(pixel_values, "b f c h w -> (b f) c h w")
+                bs = vae_mini_batch
+                new_pixel_values = []
+                for i in range(0, pixel_values.shape[0], bs):
+                    pixel_values_bs = pixel_values[i : i + bs]
+                    pixel_values_bs = vae.encode(pixel_values_bs.to(dtype=weight_dtype)).latent_dist
+                    pixel_values_bs = pixel_values_bs.sample()
+                    new_pixel_values.append(pixel_values_bs)
+                latents = torch.cat(new_pixel_values, dim=0)
+                latents = rearrange(latents, "(b f) c h w -> b c f h w", f=video_length)
+            return latents
+
+        mask_latents1 = _batch_encode_vae(mask_pixel_values_with_noise)  # torch.Size([1, 16, 13, 64, 64])
+        # mask_pixel_values_with_noise = -1 * torch.ones_like(mask_pixel_values_with_noise)
+        # mask_latents1 = _batch_encode_vae(mask_pixel_values_with_noise)  # torch.Size([1, 16, 13, 64, 64])
+        # mask_latents1 = mask_latents1 * vae.config.scaling_factor
+
+    # print("max value of mask_pixel_values_with_noise: ", mask_pixel_values_with_noise.max())
+    # print("min value of mask_pixel_values_with_noise: ", mask_pixel_values_with_noise.min())
+    # print("max value of mask_latents1: ", mask_latents1.max())
+    # print("min value of mask_latents1: ", mask_latents1.min())
+
+    # mask_latents2_reshape = rearrange(mask_warped, "b f c h w -> b c f h w")  # torch.Size([1, 3, 49, 512, 512])
+    # mask_latents2 = resize_latents(mask_latents2_reshape, latents, vae.cache_mag_vae)  # torch.Size([1, 16, 13, 64, 64])
+    # _, _, _, latents_h, latents_w = latents.shape
+    # depths_reshape = F.interpolate(depths.unsqueeze(1), (latents_h, latents_w), mode="bilinear", align_corners=True).squeeze(1)  # torch.Size([1, 64, 64])
+    # # print("max value of latents: ", latents.max())
+    # # print("min value of latents: ", latents.min())
+    # latents_first_frame = latents[:, :, 0:1, :, :].squeeze(2)  # torch.Size([1, 16, 64, 64])
+    # latents_first_frame = F.interpolate(latents_first_frame, (video_sample_size, video_sample_size), mode="bilinear", align_corners=True)  # torch.Size([1, 16, 512, 512])
+    # latents_first_frame = (latents_first_frame * 0.5 + 0.5).clamp(0, 1) * 255.0  # torch.Size([1, 16, 512, 512])
+    # latents_first_frame = latents_first_frame.permute(0, 2, 3, 1).to(torch.float32)  # torch.Size([1, 64, 64, 16])
+    # _, mask_latents3 = get_mask_batch(latents_first_frame, depths_reshape, camera_poses, ori_hs, ori_ws, video_sample_size)  # torch.Size([1, 49, 16, 64, 64])
+
+    # mask_for_latent = mask_for_latent.unsqueeze(2)  # torch.Size([1, 49, 1, 64, 64])
+    # min_mask_latents3 = mask_latents3.min()
+    # mask_warped = mask_latents3 * (1 - mask_for_latent) + (min_mask_latents3) * mask_for_latent
+
+    # mask_latents3 = mask_latents3.permute(0, 2, 1, 3, 4)  # torch.Size([1, 16, 49, 64, 64])
+    # # mask_latents3 = (mask_latents3 / 255.0 - 0.5) * 2.0  # torch.Size([1, 16, 49, 512, 512])
+    # mask_latents3 = resize_mask(mask_latents3, latents, vae.cache_mag_vae).to(accelerator_device, dtype=weight_dtype)  # torch.Size([1, 16, 13, 64, 64])
+    # mask_latents3 = mask_latents3 * (1 - mask_reshape) + (mask_latents1) * mask_reshape
+
+    # mask_latents4_reshape = rearrange(mask_warped, "b f c h w -> b c f h w")  # torch.Size([1, 3, 49, 512, 512])
+    # mask_latents4_reshape = self.channel_change(mask_latents4_reshape)  # torch.Size([1, 16, 13, 64, 64])
+    # mask_latents4 = resize_latents(mask_latents4_reshape, latents, vae.cache_mag_vae)  # torch.Size([1, 16, 13, 64, 64])
+
+    # 拼接 inpaint_latents: (B, 1+潜编码通道, F, H, W)
+    # mask_reshape = mask_reshape * vae.config.scaling_factor
+    inpaint_latents = torch.cat([mask_reshape, mask_latents1], dim=1)  # torch.Size([1, 17, 13, 64, 64])
+
+    # 与 t2v_flag 相乘
+    # t2v_flag shape: (B,) => 需要扩维到 (B, 1, 1, 1, 1)
+    inpaint_latents = inpaint_latents * t2v_flag.view(-1, 1, 1, 1, 1)
+
+    # 按照 VAE scaling_factor 进行缩放
+    inpaint_latents = inpaint_latents * vae.config.scaling_factor
+
+    return inpaint_latents, mask_pixel_values, mask, mask_warped
+
+
 class EasyCamera(nn.Module):
     def __init__(self, easyanimate, depth_anything_v2):
         super().__init__()
         self.easyanimate = easyanimate
         self.depth_anything_v2 = depth_anything_v2
-        self.channel_change = nn.Conv3d(in_channels=3, out_channels=16, kernel_size=(1, 1, 1), stride=(1, 1, 1), padding=(0, 0, 0), bias=False)
-
-    def get_inpaint_latents_from_depth(
-        self,
-        depths: torch.Tensor,  # (B, 512, 512)
-        first_frames: torch.Tensor,  # (B, 512, 512, 3)
-        camera_poses: torch.Tensor,  # (B, F, 19)
-        ori_hs: torch.Tensor,  # (B,)
-        ori_ws: torch.Tensor,  # (B,)
-        video_sample_size: int,  # 512
-        pixel_values: torch.Tensor,  # (B, F, 3, 512, 512)
-        weight_dtype,
-        accelerator_device,
-        latents: torch.Tensor,  # (B, 16, 13, 64, 64)
-        vae,
-        vae_mini_batch: int,  # 1
-        video_length: int,  # 49
-    ):
-        """
-        新的函数去除了对 batch_size 的显式循环，并对部分操作做了矢量化提升。
-        """
-        # 1. 批量计算 mask: (B, F, H, W)
-        mask, warped = get_mask_batch(first_frames, depths, camera_poses, ori_hs, ori_ws, video_sample_size)  # => torch.Size([1, 49, 512, 512]), torch.Size([1, 49, 3, 512, 512])
-
-        # 注意 pixel_values 形状为 (B, F, 3, 512, 512)
-        # 与 mask (B, F, 512, 512) 广播时，需要在通道维度上做扩展
-        mask_for_pixel = mask.unsqueeze(2)  # torch.Size([1, 49, 1, 512, 512])
-
-        # 2. 生成 inpaint 像素：被 mask 的位置替换为 -1，其它使用原值
-        mask_pixel_values = pixel_values * (1 - mask_for_pixel) + (-1) * mask_for_pixel  # torch.Size([1, 49, 3, 512, 512])
-
-        video_transforms = transforms.Compose(
-            [
-                transforms.Resize(video_sample_size),
-                transforms.CenterCrop((video_sample_size, video_sample_size)),
-                transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=False),
-            ]
-        )
-
-        warped = warped / 255.0
-        warped = video_transforms(warped)  # torch.Size([1, 49, 3, 512, 512])
-
-        mask_warped = warped * (1 - mask_for_pixel) + (-1) * mask_for_pixel
-        mask_warped = mask_warped.to(accelerator_device, dtype=weight_dtype)  # torch.Size([1, 49, 3, 512, 512])
-
-        # 3. 处理 t2v_flag 的逻辑
-        # 原代码:
-        #     t2v_flag = [(_mask == 1).all() for _mask in mask]
-        #     for _mask in t2v_flag:
-        #         if _mask and np.random.rand() < 0.90: ...
-        #
-        # 这里矢量化：
-        #    先判断整段 mask 是否全部为 1
-        #    rand < 0.9 时则置 0，否则置 1
-        #
-        # mask => (B, F, H, W)
-        # (mask == 1).all(dim=(1,2,3)) => (B,) 表示该 batch 下所有像素都为 1 的布尔值
-        mask_all_ones = (mask == 1).reshape(mask.shape[0], -1).all(dim=1)  # (B,)
-        rand_values = torch.rand_like(mask_all_ones.float())
-        # 当 mask_all_ones=True 且 rand<0.9 => flag=0，否则=1
-        t2v_flag = torch.where(
-            (mask_all_ones & (rand_values < 0.9)),
-            torch.zeros_like(mask_all_ones, dtype=mask_all_ones.dtype),
-            torch.ones_like(mask_all_ones, dtype=mask_all_ones.dtype),
-        )
-        # 转到指定设备
-        t2v_flag = t2v_flag.to(accelerator_device, dtype=weight_dtype)
-
-        # 4. 编码 mask，本质上就是 1-mask 并缩放到与 latents 同尺寸
-        #    先把 mask 从 (B, F, H, W) -> (B, 1, F, H, W)
-        mask_reshape = rearrange(mask, "b f h w -> b 1 f h w")  # torch.Size([1, 1, 49, 512, 512])
-        mask_reshape = 1 - mask_reshape
-        mask_reshape = resize_mask(mask_reshape, latents, vae.cache_mag_vae)  # torch.Size([1, 1, 13, 64, 64])
-
-        # # 5. 可选：对原视频添加噪声
-        # mask_pixel_values_with_noise = add_noise_to_reference_video(mask_warped)  # torch.Size([1, 49, 3, 512, 512])
-
-        # # 6. 编码 inpaint latents：将 mask_pixel_values 传进 VAE 得到 mask_latents
-        # # with torch.no_grad():
-        # mask_latents1 = _batch_encode_vae(mask_pixel_values_with_noise, vae, vae_mini_batch, weight_dtype, video_length)  # torch.Size([1, 16, 13, 64, 64])
-
-        # mask_latents2_reshape = rearrange(mask_warped, "b f c h w -> b c f h w")  # torch.Size([1, 3, 49, 512, 512])
-        # mask_latents2 = resize_latents(mask_latents2_reshape, latents, vae.cache_mag_vae)  # torch.Size([1, 16, 13, 64, 64])
-        # _, _, _, latents_h, latents_w = latents.shape
-        # depths_reshape = F.interpolate(depths.unsqueeze(1), (latents_h, latents_w), mode="bilinear", align_corners=True).squeeze(1)  # torch.Size([1, 64, 64])
-        # print("max value of latents: ", latents.max())
-        # print("min value of latents: ", latents.min())
-        # latents_first_frame = latents[:, :, 0:1, :, :].squeeze(2)  # torch.Size([1, 16, 64, 64])
-        # latents_first_frame = F.interpolate(latents_first_frame, (video_sample_size, video_sample_size), mode="bilinear", align_corners=True)  # torch.Size([1, 16, 512, 512])
-        # latents_first_frame = (latents_first_frame * 0.5 + 0.5).clamp(0, 1) * 255.0  # torch.Size([1, 16, 512, 512])
-        # latents_first_frame = latents_first_frame.permute(0, 2, 3, 1).to(torch.float32)  # torch.Size([1, 512, 512, 16])
-        # mask_latent, mask_latents3 = get_mask_batch(latents_first_frame, depths, camera_poses, ori_hs, ori_ws, video_sample_size)  # torch.Size([1, 49, 16, 512, 512])
-        # mask_latents3 = mask_latents3.permute(0, 2, 1, 3, 4)  # torch.Size([1, 16, 49, 512, 512])
-        # mask_latents3 = (mask_latents3 / 255.0 - 0.5) * 2.0  # torch.Size([1, 16, 49, 512, 512])
-        # mask_latents3 = resize_mask(mask_latents3, latents, vae.cache_mag_vae).to(accelerator_device, dtype=weight_dtype)  # torch.Size([1, 16, 13, 64, 64])
-
-        mask_latents4_reshape = rearrange(mask_warped, "b f c h w -> b c f h w")  # torch.Size([1, 3, 49, 512, 512])
-        mask_latents4_reshape = self.channel_change(mask_latents4_reshape)  # torch.Size([1, 16, 13, 64, 64])
-        mask_latents4 = resize_latents(mask_latents4_reshape, latents, vae.cache_mag_vae)  # torch.Size([1, 16, 13, 64, 64])
-
-        # 拼接 inpaint_latents: (B, 1+潜编码通道, F, H, W)
-        inpaint_latents = torch.cat([mask_reshape, mask_latents4], dim=1)  # torch.Size([1, 17, 13, 64, 64])
-
-        # 与 t2v_flag 相乘
-        # t2v_flag shape: (B,) => 需要扩维到 (B, 1, 1, 1, 1)
-        inpaint_latents = inpaint_latents * t2v_flag.view(-1, 1, 1, 1, 1)
-
-        # 按照 VAE scaling_factor 进行缩放
-        inpaint_latents = inpaint_latents * vae.config.scaling_factor
-
-        return inpaint_latents, mask_pixel_values, mask, mask_warped
+        # self.channel_change = nn.Conv3d(in_channels=3, out_channels=16, kernel_size=(1, 1, 1), stride=(1, 1, 1), padding=(0, 0, 0), bias=False)
 
     def forward(
         self,
@@ -340,7 +381,7 @@ class EasyCamera(nn.Module):
         depths = self.depth_anything_v2.forward(first_frames_processed)  # torch.Size([2, 518, 518])
         depths = F.interpolate(depths.unsqueeze(1), (h, w), mode="bilinear", align_corners=True).squeeze(1)  # torch.Size([2, 512, 512])
 
-        inpaint_latents, mask_pixel_values, mask, mask_warped = self.get_inpaint_latents_from_depth(
+        inpaint_latents, mask_pixel_values, mask, mask_warped = get_inpaint_latents_from_depth(
             depths,
             first_frames,
             camera_poses,

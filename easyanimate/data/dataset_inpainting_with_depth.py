@@ -478,7 +478,7 @@ class VideoDatasetWithDepth(Dataset):
 
         camera_poses = torch.tensor([camera_poses[i] for i in batch_index])
 
-        return pixel_values, camera_poses, text, data_type, ori_h, ori_w
+        return pixel_values, camera_poses, text, data_type, ori_h, ori_w, video_id, title
 
     def __len__(self):
         return self.length
@@ -494,7 +494,7 @@ class VideoDatasetWithDepth(Dataset):
                 # if data_type_local != data_type:
                 #     raise ValueError("data_type_local != data_type")
 
-                pixel_values, camera_poses, text, data_type, ori_h, ori_w = self.get_batch(idx)
+                pixel_values, camera_poses, text, data_type, ori_h, ori_w, video_id, title = self.get_batch(idx)
                 sample["pixel_values"] = pixel_values
                 sample["camera_poses"] = camera_poses
                 sample["text"] = text
@@ -502,6 +502,8 @@ class VideoDatasetWithDepth(Dataset):
                 sample["idx"] = idx
                 sample["ori_h"] = ori_h
                 sample["ori_w"] = ori_w
+                sample["video_id"] = video_id
+                sample["title"] = title
 
                 if len(sample) > 0:
                     break

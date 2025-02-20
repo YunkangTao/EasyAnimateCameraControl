@@ -493,8 +493,8 @@ def warp_function_batch(
 
     # ========== 1) 预处理 ==========
     # 这里沿用与 warp_function 相同的预处理思路
-    src_image = preprocess_image(src_image)  # (B, C, 512, 512)
-    src_depth = preprocess_image(src_depth)  # (B, 1, 512, 512)
+    # src_image = preprocess_image(src_image)  # (B, C, 512, 512)
+    # src_depth = preprocess_image(src_depth)  # (B, 1, 512, 512)
 
     B, C, H, W = src_image.shape
     F_ = rel_view_mtx.shape[1]  # 视频帧数
@@ -502,7 +502,7 @@ def warp_function_batch(
     # ========== 2) viewport_mtx ==========
     # 在原 warp_function 中是 get_viewport_matrix(512, 512, batch_size=1,...)
     # 这里要改为 batch_size=B，再加上F维度
-    viewport_mtx = get_viewport_matrix(width=512, height=512, batch_size=B, device=device).to(dtype)  # (B, 4, 4)
+    viewport_mtx = get_viewport_matrix(width=W, height=H, batch_size=B, device=device).to(dtype)  # (B, 4, 4)
     # 扩展到 (B, F, 4, 4)
     viewport_mtx = viewport_mtx.unsqueeze(1).expand(-1, F_, -1, -1)  # (B, F, 4, 4)
 

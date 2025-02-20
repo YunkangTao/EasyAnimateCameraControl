@@ -12,7 +12,7 @@ accelerate launch \
   --use_deepspeed \
   --deepspeed_config_file config/zero_stage2_config.json \
   --deepspeed_multinode_launcher standard \
-  --main_process_port 29502 \
+  --main_process_port 29505 \
   scripts/train_inpainting_with_depth.py \
   --pretrained_model_name_or_path=$MODEL_NAME \
   --train_data_dir=$DATASET_NAME \

@@ -113,9 +113,10 @@ def save_videos_set(
     depths: torch.Tensor,  # [B, 512, 512], 值域 [0,80]
     mask: torch.Tensor,  # [B, 49, 512, 512], 值域 {0,1}
     mask_warped: torch.Tensor,  # [B, 49, 3, 512, 512], 值域 [-1,1]
-    mask_pixel_values: torch.Tensor,  # [B, 49, 3, 512, 512], 值域 [-1,1]
+    mask_pixel_values: torch.Tensor,  # [B, 49, 3, 512, 512], 值域 [-1,1] torch.Size([1, 3, 49, 512, 512])
     pixel_values: torch.Tensor,  # [B, 49, 3, 512, 512], 值域 [-1,1]
     save_path: str,  # 存储视频的文件夹路径，输出视频会以下标自动命名
+    fps: int = 14,
 ):
     """
     将同一个 batch（batch_size=B）的数据合成为 B 个视频文件，
@@ -130,7 +131,8 @@ def save_videos_set(
         pixel_values: torch.Size([B, 49, 3, 512, 512]), 取值范围 [-1,1]
         save_path: 视频保存文件夹路径
     """
-    os.makedirs(save_path, exist_ok=True)
+    dir_path = os.path.dirname(save_path)
+    os.makedirs(dir_path, exist_ok=True)
 
     # 转成 numpy 并移动到 CPU 上（若已经在 CPU 则无需 .cpu()）
     first_frames_np = first_frames.cpu().numpy()
@@ -148,7 +150,6 @@ def save_videos_set(
     start_index = len(existing_files)  # 从已有文件数量继续往后编号
 
     # 视频写入相关设置
-    fps = 14
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 
     for i in range(B):
@@ -182,7 +183,7 @@ def save_videos_set(
         # (e) mask_pixel_values[i] -> shape [49,3,512,512], 值域 [-1,1]
         #     先归一化到 [0,255], 再转 [T,512,512,3]
         mpv_i = mask_pixel_values_np[i]  # [49,3,512,512]
-        mpv_i = _normalize_img(mpv_i, -1, 1)
+        mpv_i = _normalize_img(mpv_i, mpv_i.min(), mpv_i.max())
         mpv_i = np.transpose(mpv_i, (0, 2, 3, 1))  # [T,512,512,3]
 
         # (f) pixel_values[i] -> 同样处理
@@ -195,8 +196,11 @@ def save_videos_set(
         out_h = 2 * 512
         out_w = 3 * 512
 
-        video_index = start_index + i
-        video_fn = os.path.join(save_path, f"video_{video_index}.mp4")
+        if save_path.endswith(".mp4"):
+            video_fn = save_path
+        else:
+            video_index = start_index + i
+            video_fn = os.path.join(save_path, f"video_{video_index}.mp4")
         out_writer = cv2.VideoWriter(video_fn, fourcc, fps, (out_w, out_h))
 
         # 3) 拼帧并写入视频
