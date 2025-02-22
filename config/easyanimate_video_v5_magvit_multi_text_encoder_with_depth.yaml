@@ -23,6 +23,6 @@ depth_anything_kwargs:
   dav2_outdoor: true
 
 loss_weights:
-  lambda_diffusion: 0
-  lambda_pixel: 1
+  lambda_diffusion: 1
+  lambda_pixel: 0
   lambda_match: 0

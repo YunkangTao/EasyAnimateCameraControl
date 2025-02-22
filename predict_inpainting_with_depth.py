@@ -355,7 +355,7 @@ def main(
         clip_pixel_values = sample["clip_pixel_values"].unsqueeze(0).to("cuda")
 
         with torch.no_grad():
-            sample, depths, mask, mask_warped = pipeline(
+            video, depths, mask, mask_warped = pipeline(
                 text,
                 video_length=video_length,
                 negative_prompt=negative_prompt,
@@ -373,7 +373,7 @@ def main(
                 type=type,
                 return_dict=False,
             )
-        sample = sample.permute([0, 2, 1, 3, 4])
+        video = video.permute([0, 2, 1, 3, 4])
 
         video_path = os.path.join(save_path, video_id)
         dir_path = os.path.dirname(video_path)
@@ -397,7 +397,7 @@ def main(
         #     # video_path = os.path.join(save_path, prefix + ".mp4")
         #     # save_videos_grid(sample, video_path, fps=fps)
 
-        save_videos_set(clip_pixel_values, depths, mask, mask_warped, sample, pixel_values, video_path, fps)
+        save_videos_set(clip_pixel_values, depths, mask, mask_warped, video, pixel_values, video_path, fps)
         save_camera_pose(save_camera_path, camera_poses, title)
 
 
@@ -433,8 +433,8 @@ if __name__ == '__main__':
     lora_weight = 0.55
 
     # Load pretrained model if need
-    # checkpoint_path = "output_dir_20250211_inpainting_with_depth_attn1_head/checkpoint-8038"
-    checkpoint_path = None
+    checkpoint_path = "output_dir_20250219_inpainting_with_depth_transformer/checkpoint-8038"
+    # checkpoint_path = None
 
     # Other params
     sample_size = [512, 512]
@@ -448,7 +448,7 @@ if __name__ == '__main__':
 
     negative_prompt = "Twisted body, limb deformities, text captions, comic, static, ugly, error, messy code, Blurring, mutation, deformation, distortion, dark and solid, comics, text subtitles, line art, quiet, solid."
 
-    save_path = "output_dir_baseline"
+    save_path = "output_dir_20250219_inpainting_with_depth_transformer/results_checkpoint-8038"
 
     main(
         GPU_memory_mode,

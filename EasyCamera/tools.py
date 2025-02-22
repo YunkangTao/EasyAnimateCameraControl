@@ -131,7 +131,10 @@ def save_videos_set(
         pixel_values: torch.Size([B, 49, 3, 512, 512]), 取值范围 [-1,1]
         save_path: 视频保存文件夹路径
     """
-    dir_path = os.path.dirname(save_path)
+    if save_path.endswith(".mp4"):
+        dir_path = os.path.dirname(save_path)
+    else:
+        dir_path = save_path
     os.makedirs(dir_path, exist_ok=True)
 
     # 转成 numpy 并移动到 CPU 上（若已经在 CPU 则无需 .cpu()）
@@ -183,7 +186,7 @@ def save_videos_set(
         # (e) mask_pixel_values[i] -> shape [49,3,512,512], 值域 [-1,1]
         #     先归一化到 [0,255], 再转 [T,512,512,3]
         mpv_i = mask_pixel_values_np[i]  # [49,3,512,512]
-        mpv_i = _normalize_img(mpv_i, mpv_i.min(), mpv_i.max())
+        mpv_i = _normalize_img(mpv_i, -1, 1)
         mpv_i = np.transpose(mpv_i, (0, 2, 3, 1))  # [T,512,512,3]
 
         # (f) pixel_values[i] -> 同样处理

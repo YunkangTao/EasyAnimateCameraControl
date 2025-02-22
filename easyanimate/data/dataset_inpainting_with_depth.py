@@ -417,10 +417,7 @@ class VideoDatasetWithDepth(Dataset):
         # self.larger_side_of_image_and_video = max(min(self.image_sample_size), min(self.video_sample_size))
         self.short_side = min(self.video_sample_size)
 
-    def get_batch(self, idx):
-        data_info = self.dataset[idx % len(self.dataset)]
-
-        video_id, camera_id, text, data_type = data_info['video_file_path'], data_info['camera_file_path'], data_info['text'], data_info['type']
+    def get_batch_realestate(self, idx, video_id, camera_id):
 
         if self.data_root is None:
             video_dir = video_id
@@ -478,7 +475,7 @@ class VideoDatasetWithDepth(Dataset):
 
         camera_poses = torch.tensor([camera_poses[i] for i in batch_index])
 
-        return pixel_values, camera_poses, text, data_type, ori_h, ori_w, video_id, title
+        return pixel_values, camera_poses, ori_h, ori_w, title
 
     def __len__(self):
         return self.length
@@ -489,12 +486,22 @@ class VideoDatasetWithDepth(Dataset):
         while True:
             sample = {}
             try:
-                # data_info_local = self.dataset[idx % len(self.dataset)]
-                # data_type_local = data_info_local.get('type', 'image')
-                # if data_type_local != data_type:
-                #     raise ValueError("data_type_local != data_type")
+                data_info = self.dataset[idx % len(self.dataset)]
+                video_id, camera_id, text, data_type = data_info['video_file_path'], data_info['camera_file_path'], data_info['text'], data_info['type']
 
-                pixel_values, camera_poses, text, data_type, ori_h, ori_w, video_id, title = self.get_batch(idx)
+                if data_type == "realestate":
+                    pixel_values, camera_poses, ori_h, ori_w, title = self.get_batch_realestate(idx, video_id, camera_id)
+                elif data_type == "kubric":
+                    pass
+                elif data_type == "objaverse":
+                    pass
+                elif data_type == "VidGen":
+                    pass
+                elif data_type == "GenXD":
+                    pass
+                else:
+                    raise ValueError(f"Unknown data type: {data_type}")
+
                 sample["pixel_values"] = pixel_values
                 sample["camera_poses"] = camera_poses
                 sample["text"] = text

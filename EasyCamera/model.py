@@ -268,37 +268,80 @@ def get_inpaint_latents_from_depth(
     mask_pixel_values_with_noise = add_noise_to_reference_video(mask_warped)  # torch.Size([1, 49, 3, 512, 512])
     # mask_pixel_values_with_noise = mask_warped  # torch.Size([1, 49, 3, 512, 512])
 
-    # 6. 编码 inpaint latents：将 mask_pixel_values 传进 VAE 得到 mask_latents
-    with torch.no_grad():
+    # # 6. 编码 inpaint latents：将 mask_pixel_values 传进 VAE 得到 mask_latents
+    # with torch.no_grad():
 
-        def _batch_encode_vae(pixel_values):
-            if vae.quant_conv is None or vae.quant_conv.weight.ndim == 5:
-                pixel_values = rearrange(pixel_values, "b f c h w -> b c f h w")
-                bs = vae_mini_batch
-                new_pixel_values = []
-                for i in range(0, pixel_values.shape[0], bs):
-                    pixel_values_bs = pixel_values[i : i + bs]
-                    pixel_values_bs = vae.encode(pixel_values_bs)[0]
-                    pixel_values_bs = pixel_values_bs.sample()
-                    new_pixel_values.append(pixel_values_bs)
-                latents = torch.cat(new_pixel_values, dim=0)
-            else:
-                pixel_values = rearrange(pixel_values, "b f c h w -> (b f) c h w")
-                bs = vae_mini_batch
-                new_pixel_values = []
-                for i in range(0, pixel_values.shape[0], bs):
-                    pixel_values_bs = pixel_values[i : i + bs]
-                    pixel_values_bs = vae.encode(pixel_values_bs.to(dtype=weight_dtype)).latent_dist
-                    pixel_values_bs = pixel_values_bs.sample()
-                    new_pixel_values.append(pixel_values_bs)
-                latents = torch.cat(new_pixel_values, dim=0)
-                latents = rearrange(latents, "(b f) c h w -> b c f h w", f=video_length)
-            return latents
+    #     def _batch_encode_vae(pixel_values):
+    #         if vae.quant_conv is None or vae.quant_conv.weight.ndim == 5:
+    #             pixel_values = rearrange(pixel_values, "b f c h w -> b c f h w")
+    #             bs = vae_mini_batch
+    #             new_pixel_values = []
+    #             for i in range(0, pixel_values.shape[0], bs):
+    #                 pixel_values_bs = pixel_values[i : i + bs]
+    #                 pixel_values_bs = vae.encode(pixel_values_bs)[0]
+    #                 pixel_values_bs = pixel_values_bs.sample()
+    #                 new_pixel_values.append(pixel_values_bs)
+    #             latents = torch.cat(new_pixel_values, dim=0)
+    #         else:
+    #             pixel_values = rearrange(pixel_values, "b f c h w -> (b f) c h w")
+    #             bs = vae_mini_batch
+    #             new_pixel_values = []
+    #             for i in range(0, pixel_values.shape[0], bs):
+    #                 pixel_values_bs = pixel_values[i : i + bs]
+    #                 pixel_values_bs = vae.encode(pixel_values_bs.to(dtype=weight_dtype)).latent_dist
+    #                 pixel_values_bs = pixel_values_bs.sample()
+    #                 new_pixel_values.append(pixel_values_bs)
+    #             latents = torch.cat(new_pixel_values, dim=0)
+    #             latents = rearrange(latents, "(b f) c h w -> b c f h w", f=video_length)
+    #         return latents
 
-        mask_latents1 = _batch_encode_vae(mask_pixel_values_with_noise)  # torch.Size([1, 16, 13, 64, 64])
-        # mask_pixel_values_with_noise = -1 * torch.ones_like(mask_pixel_values_with_noise)
-        # mask_latents1 = _batch_encode_vae(mask_pixel_values_with_noise)  # torch.Size([1, 16, 13, 64, 64])
-        # mask_latents1 = mask_latents1 * vae.config.scaling_factor
+    # mask_latents1 = _batch_encode_vae(mask_pixel_values_with_noise)  # torch.Size([1, 16, 13, 64, 64])
+    # mask_pixel_values_with_noise = -1 * torch.ones_like(mask_pixel_values_with_noise)
+    # mask_latents1 = _batch_encode_vae(mask_pixel_values_with_noise)  # torch.Size([1, 16, 13, 64, 64])
+    # mask_latents1 = mask_latents1 * vae.config.scaling_factor
+
+    # 1. 冻结 VAE 的参数，避免更新
+
+    for param in vae.parameters():
+        param.requires_grad = False
+
+    # 2. 定义自定义 Autograd Function 采用 STE （直通估计）
+    class VAEForwardSTE(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, pixel_values):
+            # 前向传播时，在 no_grad 下计算 VAE 编码，节省显存
+            with torch.no_grad():
+                if vae.quant_conv is None or vae.quant_conv.weight.ndim == 5:
+                    # 假设输入 shape 为 (b, f, c, h, w)，重排形状符合 VAE 编码要求
+                    pixel_values_re = rearrange(pixel_values, "b f c h w -> b c f h w")
+                    bs = vae_mini_batch
+                    latent_list = []
+                    for i in range(0, pixel_values_re.shape[0], bs):
+                        pv_bs = pixel_values_re[i : i + bs]
+                        pv_bs = vae.encode(pv_bs)[0]
+                        pv_bs = pv_bs.sample()
+                        latent_list.append(pv_bs)
+                    latent = torch.cat(latent_list, dim=0)
+                else:
+                    pixel_values_re = rearrange(pixel_values, "b f c h w -> (b f) c h w")
+                    bs = vae_mini_batch
+                    latent_list = []
+                    for i in range(0, pixel_values_re.shape[0], bs):
+                        pv_bs = pixel_values_re[i : i + bs]
+                        pv_bs = vae.encode(pv_bs.to(dtype=weight_dtype)).latent_dist
+                        pv_bs = pv_bs.sample()
+                        latent_list.append(pv_bs)
+                    latent = torch.cat(latent_list, dim=0)
+                    latent = rearrange(latent, "(b f) c h w -> b c f h w", f=video_length)
+            return latent
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            # 采用直通估计，将上游传来的梯度直接返回给 pixel_values
+            # 这相当于把该函数在反向传播中的梯度计算当做恒等映射
+            return grad_output
+
+    mask_latents1 = VAEForwardSTE.apply(mask_pixel_values_with_noise)
 
     # print("max value of mask_pixel_values_with_noise: ", mask_pixel_values_with_noise.max())
     # print("min value of mask_pixel_values_with_noise: ", mask_pixel_values_with_noise.min())
