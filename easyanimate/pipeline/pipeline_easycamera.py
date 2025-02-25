@@ -1001,10 +1001,12 @@ class EasyCameraPipeline(DiffusionPipeline):
             pbar.update(1)
 
         # 6. prepare depths
-        first_frames_processed, (h, w) = pre_process_first_frames(clip_image, device, clip_image.dtype)  # 2,3,518,518
+        first_frames_processed, (h, w) = pre_process_first_frames(clip_image, device, clip_image.dtype)  # clip_image: b,f,c,h,w;-1,1 ; first_frames_processed: b,f,c,h,w;-1,1
         self.easycamera.depth_anything_v2.to(device)
-        depths = self.easycamera.depth_anything_v2.forward(first_frames_processed)  # torch.Size([2, 518, 518])
-        depths = F.interpolate(depths.unsqueeze(1), (h, w), mode="bilinear", align_corners=True).squeeze(1)  # torch.Size([2, 512, 512])
+        first_frames_processed = rearrange(first_frames_processed, "b f c h w -> (b f) c h w")
+        depths = self.easycamera.depth_anything_v2.forward(first_frames_processed)  # torch.Size([49, 518, 518])
+        depths = F.interpolate(depths.unsqueeze(1), (h, w), mode="bilinear", align_corners=True).squeeze(1)  # torch.Size([49, 512, 512])
+        depths = rearrange(depths, "(b f) h w -> b f h w", f=video_length)  # torch.Size([1, 49, 512, 512])
         clip_encoder_hidden_states_input = None
         clip_attention_mask_input = None
         # # 6. Prepare clip latents if it needs.
@@ -1044,8 +1046,8 @@ class EasyCameraPipeline(DiffusionPipeline):
         # 7. Prepare inpaint latents if it needs.
 
         inpaint_latents, _, mask, mask_warped = get_inpaint_latents_from_depth(
-            depths,
-            clip_image,
+            depths,  # torch.Size([b, f, 512, 512])
+            clip_image,  # clip_image: b,f,c,h,w;-1,1
             camera_poses,
             torch.tensor(ori_h),
             torch.tensor(ori_w),

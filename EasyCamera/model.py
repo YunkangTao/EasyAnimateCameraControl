@@ -170,14 +170,16 @@ def add_noise_to_reference_video(image: torch.Tensor, ratio: float = None, mean:
 
 def pre_process_first_frames(first_frames, device, dtype, input_size=518):
     # 1. 记录原图大小
-    batch_size, h, w, c = first_frames.shape
+    first_frames = first_frames * 0.5 + 0.5
+    b, f, c, h, w = first_frames.shape
     original_hw = (h, w)
 
-    # 2. 将像素值从 0–255 转为 0–1，并转为 float
-    frames = first_frames.float() / 255.0
+    # # 2. 将像素值从 0–255 转为 0–1，并转为 float
+    # frames = first_frames.float() / 255.0
 
     # 3. 通道从 [N, H, W, C] -> [N, C, H, W]
-    frames = frames.permute(0, 3, 1, 2)  # [batch_size, 3, 512, 512]
+    # frames = frames.permute(0, 3, 1, 2)  # [batch_size, 3, 512, 512]
+    frames = rearrange(first_frames, "b f c h w -> (b f) c h w")
 
     # 4. 缩放到指定大小 (可根据需要调整或去掉)
     frames = F.interpolate(frames, size=(input_size, input_size), mode='bicubic', align_corners=False)
@@ -187,6 +189,8 @@ def pre_process_first_frames(first_frames, device, dtype, input_size=518):
     std = torch.tensor([0.229, 0.224, 0.225], device=frames.device).view(1, 3, 1, 1)
     frames = (frames - mean) / std
 
+    frames = rearrange(frames, "(b f) c h w -> b f c h w", f=f)
+
     # 6. 放到指定的计算设备上
     frames = frames.to(dtype=dtype, device=device)
 
@@ -194,8 +198,8 @@ def pre_process_first_frames(first_frames, device, dtype, input_size=518):
 
 
 def get_inpaint_latents_from_depth(
-    depths: torch.Tensor,  # (B, 512, 512)
-    first_frames: torch.Tensor,  # (B, 512, 512, 3)
+    depths: torch.Tensor,  # torch.Size([1, 49, 512, 512])
+    first_frames: torch.Tensor,  # torch.Size([1, 49, 3, 512, 512])
     camera_poses: torch.Tensor,  # (B, F, 19)
     ori_hs: torch.Tensor,  # (B,)
     ori_ws: torch.Tensor,  # (B,)
@@ -232,7 +236,8 @@ def get_inpaint_latents_from_depth(
     warped = warped / 255.0
     warped = video_transforms(warped)  # torch.Size([1, 49, 3, 512, 512])
 
-    mask_warped = warped * (1 - mask_for_pixel) + (-1) * mask_for_pixel
+    # mask_warped = warped * (1 - mask_for_pixel) + (-1) * mask_for_pixel
+    mask_warped = warped * (mask_for_pixel < 0.5) + torch.ones_like(warped) * (mask_for_pixel > 0.5) * -1
     mask_warped = mask_warped.to(accelerator_device, dtype=weight_dtype)  # torch.Size([1, 49, 3, 512, 512])
 
     # 3. 处理 t2v_flag 的逻辑

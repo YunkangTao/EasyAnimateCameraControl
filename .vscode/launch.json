@@ -109,7 +109,7 @@
             "env": {
                 "CUDA_VISIBLE_DEVICES": "5"
             },
-            "justMyCode": true
+            "justMyCode": false
         }
     ]
 }

@@ -439,9 +439,11 @@ class VideoDatasetWithDepth(Dataset):
             # batch_index = np.linspace(start_idx, start_idx + clip_length - 1, min_sample_n_frames, dtype=int)
 
             batch_index = sample_video_frames(self.video_sample_n_frames, self.video_sample_stride, len(video_reader), self.video_length_drop_start, self.video_length_drop_end)
+            batch_index_input = [batch_index[0]] * self.video_sample_n_frames
+            batch_index_all = batch_index_input + batch_index
             # batch_index = [i for i in range(49)]
             try:
-                sample_args = (video_reader, batch_index)
+                sample_args = (video_reader, batch_index_all)
                 pixel_values = func_timeout(VIDEO_READER_TIMEOUT, get_video_reader_batch, args=sample_args)
 
                 first_frame = video_reader[0].asnumpy()
@@ -469,13 +471,16 @@ class VideoDatasetWithDepth(Dataset):
             if not self.enable_bucket:
                 pixel_values = self.video_transforms(pixel_values)
 
+            input_pixel_values = pixel_values[: self.video_sample_n_frames]
+            pixel_values_output = pixel_values[self.video_sample_n_frames :]
+
             # Random use no text generation
             if random.random() < self.text_drop_ratio:
                 text = ''
 
         camera_poses = torch.tensor([camera_poses[i] for i in batch_index])
 
-        return pixel_values, camera_poses, ori_h, ori_w, title
+        return input_pixel_values, pixel_values_output, camera_poses, ori_h, ori_w, title
 
     def __len__(self):
         return self.length
@@ -490,7 +495,7 @@ class VideoDatasetWithDepth(Dataset):
                 video_id, camera_id, text, data_type = data_info['video_file_path'], data_info['camera_file_path'], data_info['text'], data_info['type']
 
                 if data_type == "realestate":
-                    pixel_values, camera_poses, ori_h, ori_w, title = self.get_batch_realestate(idx, video_id, camera_id)
+                    input_pixel_values, pixel_values, camera_poses, ori_h, ori_w, title = self.get_batch_realestate(idx, video_id, camera_id)
                 elif data_type == "kubric":
                     pass
                 elif data_type == "objaverse":
@@ -511,6 +516,7 @@ class VideoDatasetWithDepth(Dataset):
                 sample["ori_w"] = ori_w
                 sample["video_id"] = video_id
                 sample["title"] = title
+                sample["clip_pixel_values"] = input_pixel_values
 
                 if len(sample) > 0:
                     break
@@ -518,20 +524,20 @@ class VideoDatasetWithDepth(Dataset):
                 print(e, self.dataset[idx % len(self.dataset)])
                 idx = random.randint(0, self.length - 1)
 
-        if self.enable_inpaint and not self.enable_bucket:
-            # mask = get_random_mask(pixel_values.size())
-            # mask_pixel_values = pixel_values * (1 - mask) + torch.ones_like(pixel_values) * -1 * mask
-            # sample["mask_pixel_values"] = mask_pixel_values
-            # sample["mask"] = mask
+        # if self.enable_inpaint and not self.enable_bucket:
+        #     # mask = get_random_mask(pixel_values.size())
+        #     # mask_pixel_values = pixel_values * (1 - mask) + torch.ones_like(pixel_values) * -1 * mask
+        #     # sample["mask_pixel_values"] = mask_pixel_values
+        #     # sample["mask"] = mask
 
-            clip_pixel_values = sample["pixel_values"][0].permute(1, 2, 0).contiguous()
-            clip_pixel_values = (clip_pixel_values * 0.5 + 0.5) * 255
-            sample["clip_pixel_values"] = clip_pixel_values
+        #     clip_pixel_values = sample["pixel_values"][0].permute(1, 2, 0).contiguous()
+        #     clip_pixel_values = (clip_pixel_values * 0.5 + 0.5) * 255
+        #     sample["clip_pixel_values"] = clip_pixel_values
 
-            # ref_pixel_values = sample["pixel_values"][0].unsqueeze(0)
-            # if (mask == 1).all():
-            #     ref_pixel_values = torch.ones_like(ref_pixel_values) * -1
-            # sample["ref_pixel_values"] = ref_pixel_values
+        # ref_pixel_values = sample["pixel_values"][0].unsqueeze(0)
+        # if (mask == 1).all():
+        #     ref_pixel_values = torch.ones_like(ref_pixel_values) * -1
+        # sample["ref_pixel_values"] = ref_pixel_values
 
         return sample
 

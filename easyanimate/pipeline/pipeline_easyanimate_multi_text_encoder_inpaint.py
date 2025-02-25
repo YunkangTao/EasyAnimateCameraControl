@@ -961,9 +961,14 @@ class EasyAnimatePipeline_Multi_Text_Encoder_Inpaint(DiffusionPipeline):
             video_length = video.shape[2]
             init_video = self.image_processor.preprocess(rearrange(video, "b c f h w -> (b f) c h w"), height=height, width=width)
             init_video = init_video.to(dtype=torch.float32)
-            init_video = rearrange(init_video, "(b f) c h w -> b c f h w", f=video_length)
+            init_video = rearrange(init_video, "(b f) c h w -> b c f h w", f=video_length)  # torch.Size([1, 3, 49, 512, 512])
         else:
             init_video = None
+
+        print("max value of video", video.max())  # 1
+        print("min value of video", video.min())  # 0
+        print("max value of init_video", init_video.max())  # 1
+        print("min value of init_video", init_video.min())  # -1
 
         # Prepare latent variables
         num_channels_latents = self.vae.config.latent_channels
@@ -1047,12 +1052,12 @@ class EasyAnimatePipeline_Multi_Text_Encoder_Inpaint(DiffusionPipeline):
                 video_length = video.shape[2]
                 mask_condition = self.mask_processor.preprocess(rearrange(mask_video, "b c f h w -> (b f) c h w"), height=height, width=width)
                 mask_condition = mask_condition.to(dtype=torch.float32)
-                mask_condition = rearrange(mask_condition, "(b f) c h w -> b c f h w", f=video_length)
+                mask_condition = rearrange(mask_condition, "(b f) c h w -> b c f h w", f=video_length)  # torch.Size([1, 1, 49, 512, 512])
 
                 if num_channels_transformer != num_channels_latents:
                     mask_condition_tile = torch.tile(mask_condition, [1, 3, 1, 1, 1])
                     if masked_video_latents is None:
-                        masked_video = init_video * (mask_condition_tile < 0.5) + torch.ones_like(init_video) * (mask_condition_tile > 0.5) * -1
+                        masked_video = init_video * (mask_condition_tile < 0.5) + torch.ones_like(init_video) * (mask_condition_tile > 0.5) * -1  # torch.Size([1, 3, 49, 512, 512])
                     else:
                         masked_video = masked_video_latents
 
@@ -1069,7 +1074,7 @@ class EasyAnimatePipeline_Multi_Text_Encoder_Inpaint(DiffusionPipeline):
                             self.do_classifier_free_guidance,
                             noise_aug_strength=noise_aug_strength,
                         )
-                        mask_latents = resize_mask(1 - mask_condition, masked_video_latents, self.vae.cache_mag_vae)
+                        mask_latents = resize_mask(1 - mask_condition, masked_video_latents, self.vae.cache_mag_vae)  # torch.Size([1, 1, 13, 64, 64]) 1表示有效pixel
                         mask_latents = mask_latents.to(device, dtype) * self.vae.config.scaling_factor
                     else:
                         mask_latents, masked_video_latents = self.prepare_mask_latents(

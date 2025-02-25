@@ -90,13 +90,13 @@ def get_video_to_video_latent_with_mask(input_video_path, video_length, sample_s
                 split_frames[index].append(sub_frame)
 
     input_video = torch.from_numpy(np.array(split_frames[2]))
-    input_video = input_video.permute([3, 0, 1, 2]).unsqueeze(0) / 255
+    input_video = input_video.permute([3, 0, 1, 2]).unsqueeze(0) / 255  # torch.Size([1, 3, 49, 512, 512]) [0, 1]
 
     input_video_mask = torch.from_numpy(np.array(split_frames[4]))
     input_video_mask = input_video_mask.permute([3, 0, 1, 2]).unsqueeze(0)
     input_video_mask = (input_video_mask > 128).all(dim=1, keepdim=True)
     input_video_mask = input_video_mask * 255
-    input_video_mask = input_video_mask.to(input_video.device, input_video.dtype)
+    input_video_mask = input_video_mask.to(input_video.device, input_video.dtype)  # torch.Size([1, 1, 49, 512, 512])
 
     # output_video = torch.from_numpy(np.array(split_frames[5]))
     # output_video = output_video.permute([3, 0, 1, 2]).unsqueeze(0) / 255

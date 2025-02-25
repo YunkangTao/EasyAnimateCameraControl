@@ -1,0 +1,185 @@
+absl-py==2.1.0
+accelerate==1.0.1
+aiofiles==23.2.1
+aiohappyeyeballs==2.4.3
+aiohttp==3.10.10
+aiosignal==1.3.1
+albucore==0.0.21
+albumentations==1.4.22
+annotated-types==0.7.0
+antlr4-python3-runtime==4.9.3
+anyio==4.6.2.post1
+asttokens @ file:///home/conda/feedstock_root/build_artifacts/asttokens_1698341106958/work
+attrs==24.2.0
+av==13.1.0
+beautifulsoup4==4.12.3
+bitsandbytes==0.44.1
+came-pytorch==0.1.3
+certifi==2024.8.30
+charset-normalizer==3.4.0
+click==8.1.7
+comm @ file:///home/conda/feedstock_root/build_artifacts/comm_1710320294760/work
+contourpy==1.3.1
+cycler==0.12.1
+datasets==3.0.1
+debugpy @ file:///home/conda/feedstock_root/build_artifacts/debugpy_1731044890106/work
+decorator @ file:///home/conda/feedstock_root/build_artifacts/decorator_1641555617451/work
+decord==0.6.0
+deepspeed==0.15.2
+diffusers==0.30.3
+dill==0.3.8
+docker-pycreds==0.4.0
+einops==0.8.0
+eval_type_backport==0.2.0
+exceptiongroup @ file:///home/conda/feedstock_root/build_artifacts/exceptiongroup_1720869315914/work
+executing @ file:///home/conda/feedstock_root/build_artifacts/executing_1725214404607/work
+fastapi==0.115.2
+ffmpy==0.4.0
+filelock==3.16.1
+fonttools==4.56.0
+frozenlist==1.4.1
+fsspec==2024.6.1
+ftfy==6.3.0
+func_timeout==4.3.5
+gitdb==4.0.11
+GitPython==3.1.43
+gradio==5.1.0
+gradio_client==1.4.0
+grpcio==1.67.0
+h11==0.14.0
+hjson==3.1.0
+httpcore==1.0.6
+httpx==0.27.2
+huggingface-hub==0.25.2
+idna==3.10
+imageio==2.36.0
+imageio-ffmpeg==0.5.1
+importlib_metadata @ file:///home/conda/feedstock_root/build_artifacts/importlib-metadata_1726082825846/work
+ipykernel @ file:///home/conda/feedstock_root/build_artifacts/ipykernel_1719845459717/work
+ipython @ file:///home/conda/feedstock_root/build_artifacts/ipython_1729866374957/work
+jaxtyping==0.2.36
+jedi @ file:///home/conda/feedstock_root/build_artifacts/jedi_1731317204262/work
+Jinja2==3.1.4
+jupyter_client @ file:///home/conda/feedstock_root/build_artifacts/jupyter_client_1726610684920/work
+jupyter_core @ file:///home/conda/feedstock_root/build_artifacts/jupyter_core_1727163409502/work
+kiwisolver==1.4.8
+lazy_loader==0.4
+Markdown==3.7
+markdown-it-py==3.0.0
+MarkupSafe==2.1.5
+matplotlib==3.10.0
+matplotlib-inline @ file:///home/conda/feedstock_root/build_artifacts/matplotlib-inline_1713250518406/work
+mdurl==0.1.2
+mpmath==1.3.0
+msgpack==1.1.0
+multidict==6.1.0
+multiprocess==0.70.16
+nest_asyncio @ file:///home/conda/feedstock_root/build_artifacts/nest-asyncio_1705850609492/work
+networkx==3.4.1
+ninja==1.11.1.1
+numpy==1.26.4
+nvidia-cublas-cu11==11.11.3.6
+nvidia-cublas-cu12==12.1.3.1
+nvidia-cuda-cupti-cu11==11.8.87
+nvidia-cuda-cupti-cu12==12.1.105
+nvidia-cuda-nvrtc-cu11==11.8.89
+nvidia-cuda-nvrtc-cu12==12.1.105
+nvidia-cuda-runtime-cu11==11.8.89
+nvidia-cuda-runtime-cu12==12.1.105
+nvidia-cudnn-cu11==8.7.0.84
+nvidia-cudnn-cu12==9.1.0.70
+nvidia-cufft-cu11==10.9.0.58
+nvidia-cufft-cu12==11.0.2.54
+nvidia-curand-cu11==10.3.0.86
+nvidia-curand-cu12==10.3.2.106
+nvidia-cusolver-cu11==11.4.1.48
+nvidia-cusolver-cu12==11.4.5.107
+nvidia-cusparse-cu11==11.7.5.86
+nvidia-cusparse-cu12==12.1.0.106
+nvidia-nccl-cu11==2.19.3
+nvidia-nccl-cu12==2.20.5
+nvidia-nvjitlink-cu12==12.6.77
+nvidia-nvtx-cu11==11.8.86
+nvidia-nvtx-cu12==12.1.105
+omegaconf==2.3.0
+opencv-python==4.10.0.84
+opencv-python-headless==4.10.0.84
+orjson==3.10.7
+packaging==24.1
+pandas==2.2.3
+parso @ file:///home/conda/feedstock_root/build_artifacts/parso_1712320355065/work
+pexpect @ file:///home/conda/feedstock_root/build_artifacts/pexpect_1706113125309/work
+pickleshare @ file:///home/conda/feedstock_root/build_artifacts/pickleshare_1602536217715/work
+pillow==10.4.0
+platformdirs @ file:///home/conda/feedstock_root/build_artifacts/platformdirs_1726613481435/work
+prompt_toolkit @ file:///home/conda/feedstock_root/build_artifacts/prompt-toolkit_1727341649933/work
+propcache==0.2.0
+protobuf==5.28.2
+psutil @ file:///home/conda/feedstock_root/build_artifacts/psutil_1729847065645/work
+ptyprocess @ file:///home/conda/feedstock_root/build_artifacts/ptyprocess_1609419310487/work/dist/ptyprocess-0.7.0-py2.py3-none-any.whl
+pure_eval @ file:///home/conda/feedstock_root/build_artifacts/pure_eval_1721585709575/work
+py-cpuinfo==9.0.0
+pyarrow==17.0.0
+pydantic==2.9.2
+pydantic_core==2.23.4
+pydub==0.25.1
+Pygments @ file:///home/conda/feedstock_root/build_artifacts/pygments_1714846767233/work
+pyparsing==3.2.1
+python-dateutil @ file:///home/conda/feedstock_root/build_artifacts/python-dateutil_1731919281354/work
+python-multipart==0.0.12
+pytz==2024.2
+PyYAML==6.0.2
+pyzmq @ file:///home/conda/feedstock_root/build_artifacts/pyzmq_1728642222605/work
+regex==2024.9.11
+requests==2.32.3
+rich==13.9.2
+ruff==0.6.9
+safetensors==0.4.5
+scikit-image==0.24.0
+scipy==1.14.1
+semantic-version==2.10.0
+sentencepiece==0.2.0
+sentry-sdk==2.16.0
+setproctitle==1.3.3
+shellingham==1.5.4
+simsimd==6.1.1
+six @ file:///home/conda/feedstock_root/build_artifacts/six_1620240208055/work
+smmap==5.0.1
+sniffio==1.3.1
+soupsieve==2.6
+splatting @ git+https://github.com/pesser/splatting@1427d7c4204282d117403b35698d489e0324287f
+stack-data @ file:///home/conda/feedstock_root/build_artifacts/stack_data_1669632077133/work
+starlette==0.40.0
+stringzilla==3.10.10
+sympy==1.13.3
+tensorboard==2.18.0
+tensorboard-data-server==0.7.2
+tifffile==2024.9.20
+timm==1.0.10
+tokenizers==0.20.1
+tomesd==0.1.3
+tomlkit==0.12.0
+torch==2.2.0+cu118
+torchaudio==2.2.0+cu118
+torchdiffeq==0.2.4
+torchsde==0.2.6
+torchvision==0.17.0+cu118
+tornado @ file:///home/conda/feedstock_root/build_artifacts/tornado_1724956126282/work
+tqdm==4.66.5
+traitlets @ file:///home/conda/feedstock_root/build_artifacts/traitlets_1713535121073/work
+trampoline==0.1.2
+transformers==4.45.2
+triton==2.2.0
+typer==0.12.5
+typing_extensions @ file:///home/conda/feedstock_root/build_artifacts/typing_extensions_1717802530399/work
+tzdata==2024.2
+urllib3==2.2.3
+uvicorn==0.32.0
+wandb==0.18.3
+wcwidth @ file:///home/conda/feedstock_root/build_artifacts/wcwidth_1704731205417/work
+websockets==12.0
+Werkzeug==3.0.4
+xformers==0.0.24
+xxhash==3.5.0
+yarl==1.15.3
+zipp==3.20.2

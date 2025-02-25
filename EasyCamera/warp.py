@@ -476,8 +476,8 @@ def warp_function(
 
 
 def warp_function_batch(
-    src_image: Float[Tensor, 'B C H W'],
-    src_depth: Float[Tensor, 'B 1 H W'],
+    src_image: Float[Tensor, 'B F C H W'],  # torch.Size([1, 49, 3, 512, 512]);-1,1
+    src_depth: Float[Tensor, 'B F H W'],  # torch.Size([1, 49, 512, 512])
     rel_view_mtx: Float[Tensor, 'B F 4 4'],  # (B, F, 4, 4)
     src_proj_mtx: Float[Tensor, 'B 4 4'],  # (B, 4, 4)
     tar_proj_mtx: Float[Tensor, 'B 4 4'],  # (B, 4, 4)
@@ -496,7 +496,7 @@ def warp_function_batch(
     # src_image = preprocess_image(src_image)  # (B, C, 512, 512)
     # src_depth = preprocess_image(src_depth)  # (B, 1, 512, 512)
 
-    B, C, H, W = src_image.shape
+    B, _, C, H, W = src_image.shape
     F_ = rel_view_mtx.shape[1]  # 视频帧数
 
     # ========== 2) viewport_mtx ==========
@@ -548,8 +548,8 @@ def warp_function_batch(
     # ========== 7) 融合 depth (把 z 覆盖或相乘) ==========
     # src_depth: (B, 1, H, W) => 同样扩展到 (B, F, H, W)
     #   如果所有帧使用同样的深度(即相同相机), 也可以 repeat, 具体看需求
-    src_depth_f = src_depth.expand(B, F_, -1, -1)  # (B, F, H, W)
-    src_depth_f = src_depth_f.unsqueeze(2)
+    # src_depth_f = src_depth.expand(B, F_, -1, -1)  # (B, F, H, W)
+    src_depth_f = src_depth.unsqueeze(2)
     src_depth_f_bf = rearrange(src_depth_f, 'b f c h w -> (b f) (c) (h w)', c=1)
     # => (BF, 1, H*W)
     # 进一步恢复 => (BF, H*W, 1)
@@ -575,8 +575,8 @@ def warp_function_batch(
     embed_2d = rearrange(embed_2d, 'b f c h w -> (b f) c h w')
 
     # 源图像也需要扩展到F维度 => (B, F, C, H, W) => (BF, C, H, W)
-    src_img_f = src_image.unsqueeze(1).expand(-1, F_, -1, -1, -1)  # (B, F, C, H, W)
-    src_img_f_bf = rearrange(src_img_f, 'b f c h w -> (b f) c h w')
+    # src_img_f = src_image.unsqueeze(1).expand(-1, F_, -1, -1, -1)  # (B, F, C, H, W)
+    src_img_f_bf = rearrange(src_image, 'b f c h w -> (b f) c h w')
 
     # 拼接 => (BF, C_embed + C_src, H, W)
     input_image_bf = torch.cat([embed_2d, src_img_f_bf], dim=1)
@@ -619,8 +619,8 @@ def warp_function_batch(
 
 
 def get_mask_batch(
-    first_frames: torch.Tensor,  # (B, H, W, 3)
-    depths: torch.Tensor,  # (B, H, W)
+    first_frames: torch.Tensor,  # torch.Size([1, 49, 3, 512, 512]);-1,1
+    depths: torch.Tensor,  # torch.Size([1, 49, 512, 512])
     camera_poses: torch.Tensor,  # (B, F, 19)
     ori_hs: torch.Tensor,  # (B,)
     ori_ws: torch.Tensor,  # (B,)
@@ -633,10 +633,12 @@ def get_mask_batch(
 
     返回结果 mask 形状: (B, F, H, W)
     """
+    first_frames = (first_frames * 0.5 + 0.5) * 255.0  # -1~1 => 0~255
+
     device = first_frames.device
     dtype = first_frames.dtype
 
-    B, H, W, _ = first_frames.shape
+    B, F, C, H, W = first_frames.shape
     _, F, _ = camera_poses.shape
 
     # --------------------------
@@ -651,9 +653,9 @@ def get_mask_batch(
     focal_length_y = camera_poses[:, 0, 2]  # (B,)
 
     # 先把 first_frames, depths 转到 [B, C, H, W] 以适配 warp_function
-    # first_frames: (B, 3, H, W), depths: (B, 1, H, W)
-    first_frames_t = first_frames.permute(0, 3, 1, 2).contiguous()
-    depths_t = depths.unsqueeze(1).contiguous()
+    # first_frames: torch.Size([1, 49, 3, 512, 512]), depths: torch.Size([1, 49, 512, 512])
+    first_frames_t = first_frames.contiguous()
+    depths_t = depths.contiguous()
 
     # --------------------------
     # 2. 构建投影矩阵
@@ -677,9 +679,9 @@ def get_mask_batch(
     # 进行批量 warp，得到 (B, F, 3, H, W) 的 warped 图像
     # 注意：需要令 warp_function 支持一个“额外的帧维度 F”
     # 这里示例写了 warp_function_batch，如有需要可自行封装
-    warped = warp_function_batch(
-        first_frames_t,
-        depths_t,
+    warped = warp_function_batch(  # b,f,c,h,w
+        first_frames_t,  # clip_image: b,f,c,h,w;-1,1
+        depths_t,  # torch.Size([b, f, 512, 512])
         rel_view_mtx,  # (B, F, 4, 4)
         src_proj_mtx,  # (B, 4, 4)
         tar_proj_mtx,  # (B, 4, 4)
@@ -695,5 +697,5 @@ def get_mask_batch(
     # 当像素 == 0 时，我们设定 mask = 1，否则为 0
     # 注意，这里阈值可根据实际需求调整
     eps = 1e-7
-    mask = (warped_gray.abs() < eps).to(torch.uint8)  # (B, F, H, W)
+    mask = (warped_gray.abs() < eps).to(torch.uint8)  # (B, F, H, W) 无效pixel是1
     return mask, warped
