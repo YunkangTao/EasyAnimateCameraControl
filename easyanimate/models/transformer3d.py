@@ -24,13 +24,7 @@ import torch
 import torch.nn.functional as F
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.attention import BasicTransformerBlock
-from diffusers.models.embeddings import (
-    PatchEmbed,
-    PixArtAlphaTextProjection,
-    TimestepEmbedding,
-    Timesteps,
-    get_2d_sincos_pos_embed,
-)
+from diffusers.models.embeddings import PatchEmbed, PixArtAlphaTextProjection, TimestepEmbedding, Timesteps, get_2d_sincos_pos_embed
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.models.modeling_utils import ModelMixin
 from diffusers.models.normalization import AdaLayerNorm, AdaLayerNormContinuous
@@ -48,9 +42,7 @@ from .resampler import Resampler
 try:
     from diffusers.models.embeddings import PixArtAlphaTextProjection
 except:
-    from diffusers.models.embeddings import (
-        CaptionProjection as PixArtAlphaTextProjection,
-    )
+    from diffusers.models.embeddings import CaptionProjection as PixArtAlphaTextProjection
 
 
 class CLIPProjection(nn.Module):
@@ -121,6 +113,22 @@ class TeaCache:
         self.cnt = 0
         self.previous_modulated_input = None
         self.previous_residual = None
+
+
+def get_teacache_coefficients(model_name):
+    # The coefficients for EasyAnimateV5-7b-zh-InP should be:
+    # [-3.64204720e+03, 1.43764725e+03, -1.93045263e+02, 1.09596499e+01, -1.70663507e-01]
+    if "v5.1-7b" in model_name.lower():
+        # The coefficient was obtained by sampling videos from T2V CompBench using EasyAnimateV5.1-7b-zh-InP.
+        # This coefficient can be applied to both the EasyAnimateV5.1-7b-zh and EasyAnimateV5.1-7b-Control.
+        return [1.07862322, -4.19362456, 3.06725828, 0.33161686, 0.02374758]
+    elif "v5.1-12b" in model_name.lower():
+        # The coefficient was obtained by sampling videos from T2V CompBench using EasyAnimateV5.1-12b-zh-InP.
+        # This coefficient can be applied to both the EasyAnimateV5.1-12b-zh and EasyAnimateV5.1-12b-Control.
+        return [-10.47857366, 8.33844143, -0.78477557, 0.68798618, 0.0136149]
+    else:
+        print(f"The model {model_name} is not supported by TeaCache.")
+        return None
 
 
 class Transformer3DModel(ModelMixin, ConfigMixin):
@@ -1412,10 +1420,6 @@ class EasyAnimateTransformer3DModel(ModelMixin, ConfigMixin):
         self.gradient_checkpointing = False
 
     def enable_teacache(self, num_steps: int, rel_l1_thresh: float, coefficients: list[float] = [-10.47857366, 8.33844143, -0.78477557, 0.68798618, 0.0136149]):
-        # The coefficient was obtained by sampling videos from T2V CompBench using EasyAnimateV5.1-12b-zh-InP.
-        # This coefficient can be applied to both the EasyAnimateV5.1-12b-zh and EasyAnimateV5.1-12b-Control.
-        # The coefficients for EasyAnimateV5.1-7b-zh-InP should be:
-        # [-3.64204720e+03, 1.43764725e+03, -1.93045263e+02, 1.09596499e+01, -1.70663507e-01]
         self.teacache = TeaCache(coefficients, num_steps, rel_l1_thresh=rel_l1_thresh)
 
     def _set_gradient_checkpointing(self, module, value=False):
@@ -1496,25 +1500,26 @@ class EasyAnimateTransformer3DModel(ModelMixin, ConfigMixin):
                 should_calc = True
                 self.teacache.accumulated_rel_l1_distance = 0
             else:
-                rel_l1_distance = self.teacache.compute_rel_l1_distance(self.teacache.previous_modulated_input, modulated_inp)
+                rel_l1_distance = self.teacache.compute_rel_l1_distance(self.teacache.previous_modulated_input.to(modulated_inp.device), modulated_inp)
                 self.teacache.accumulated_rel_l1_distance += self.teacache.rescale_func(rel_l1_distance)
                 if self.teacache.accumulated_rel_l1_distance < self.teacache.rel_l1_thresh:
                     should_calc = False
                 else:
                     should_calc = True
                     self.teacache.accumulated_rel_l1_distance = 0
-            self.teacache.previous_modulated_input = modulated_inp
+            self.teacache.previous_modulated_input = modulated_inp.cpu()
             self.teacache.cnt += 1
             if self.teacache.cnt == self.teacache.num_steps:
                 # self.cnt = 0
                 self.teacache.reset()
+            del inp, temb_, encoder_hidden_states_
 
         # TeaCache
         if self.teacache is not None:
             if not should_calc:
-                hidden_states += self.teacache.previous_residual
+                hidden_states += self.teacache.previous_residual.to(modulated_inp.device)
             else:
-                ori_hidden_states = hidden_states.clone()
+                ori_hidden_states = hidden_states.clone().cpu()
 
                 # 4. Transformer blocks
                 for i, block in enumerate(self.transformer_blocks):
@@ -1558,7 +1563,8 @@ class EasyAnimateTransformer3DModel(ModelMixin, ConfigMixin):
 
                 # 5. Final block
                 hidden_states = self.norm_out(hidden_states, temb=temb)
-                self.teacache.previous_residual = hidden_states - ori_hidden_states
+                self.teacache.previous_residual = hidden_states.cpu() - ori_hidden_states
+                del ori_hidden_states
         else:
             # 4. Transformer blocks
             for i, block in enumerate(self.transformer_blocks):
@@ -1628,7 +1634,6 @@ class EasyAnimateTransformer3DModel(ModelMixin, ConfigMixin):
 
         from diffusers.utils import WEIGHTS_NAME
 
-        model = cls.from_config(config, **transformer_additional_kwargs)
         model_file = os.path.join(pretrained_model_path, WEIGHTS_NAME)
         model_file_safetensors = model_file.replace(".bin", ".safetensors")
 
@@ -1728,682 +1733,6 @@ class EasyAnimateTransformer3DModel(ModelMixin, ConfigMixin):
 
         params = [p.numel() if "attn1." in n else 0 for n, p in model.named_parameters()]
         print(f"### attn1 Parameters: {sum(params) / 1e6} M")
-
-        return model
-
-
-class EasyAnimateTransformer3DModelCameraControlV1(ModelMixin, ConfigMixin):
-    _supports_gradient_checkpointing = True
-
-    @register_to_config
-    def __init__(
-        self,
-        num_attention_heads: int = 30,
-        attention_head_dim: int = 64,
-        in_channels: Optional[int] = None,
-        out_channels: Optional[int] = None,
-        patch_size: Optional[int] = None,
-        sample_width: int = 90,
-        sample_height: int = 60,
-        ref_channels: int = None,
-        clip_channels: int = None,
-        activation_fn: str = "gelu-approximate",
-        timestep_activation_fn: str = "silu",
-        freq_shift: int = 0,
-        num_layers: int = 30,
-        mmdit_layers: int = 10000,
-        dropout: float = 0.0,
-        time_embed_dim: int = 512,
-        text_embed_dim: int = 4096,
-        text_embed_dim_t5: int = 4096,
-        norm_eps: float = 1e-5,
-        norm_elementwise_affine: bool = True,
-        flip_sin_to_cos: bool = True,
-        time_position_encoding_type: str = "3d_rope",
-        after_norm=False,
-        resize_inpaint_mask_directly: bool = False,
-        enable_clip_in_inpaint: bool = True,
-        enable_text_attention_mask: bool = True,
-        add_noise_in_inpaint_model: bool = False,
-    ):
-        super().__init__()
-        self.num_heads = num_attention_heads
-        self.inner_dim = num_attention_heads * attention_head_dim
-        self.resize_inpaint_mask_directly = resize_inpaint_mask_directly
-        self.patch_size = patch_size
-
-        post_patch_height = sample_height // patch_size
-        post_patch_width = sample_width // patch_size
-        self.post_patch_height = post_patch_height
-        self.post_patch_width = post_patch_width
-
-        self.time_proj = Timesteps(self.inner_dim, flip_sin_to_cos, freq_shift)
-        self.time_embedding = TimestepEmbedding(self.inner_dim, time_embed_dim, timestep_activation_fn)
-
-        self.proj = nn.Conv2d(in_channels, self.inner_dim, kernel_size=(patch_size, patch_size), stride=patch_size, bias=True)
-        self.text_proj = nn.Linear(text_embed_dim, self.inner_dim)
-        self.text_proj_t5 = nn.Linear(text_embed_dim_t5, self.inner_dim)
-
-        self.pose_encoder = None
-        self.pose_proj = None
-
-        if ref_channels is not None:
-            self.ref_proj = nn.Conv2d(ref_channels, self.inner_dim, kernel_size=(patch_size, patch_size), stride=patch_size, bias=True)
-            ref_pos_embedding = get_2d_sincos_pos_embed(self.inner_dim, (post_patch_height, post_patch_width))
-            ref_pos_embedding = torch.from_numpy(ref_pos_embedding)
-            self.register_buffer("ref_pos_embedding", ref_pos_embedding, persistent=False)
-
-        if clip_channels is not None:
-            self.clip_proj = nn.Linear(clip_channels, self.inner_dim)
-
-        self.transformer_blocks = nn.ModuleList(
-            [
-                EasyAnimateDiTBlock(
-                    dim=self.inner_dim,
-                    num_attention_heads=num_attention_heads,
-                    attention_head_dim=attention_head_dim,
-                    time_embed_dim=time_embed_dim,
-                    dropout=dropout,
-                    activation_fn=activation_fn,
-                    norm_elementwise_affine=norm_elementwise_affine,
-                    norm_eps=norm_eps,
-                    after_norm=after_norm,
-                    is_mmdit_block=True if _ < mmdit_layers else False,
-                )
-                for _ in range(num_layers)
-            ]
-        )
-        self.norm_final = nn.LayerNorm(self.inner_dim, norm_eps, norm_elementwise_affine)
-
-        # 5. Output blocks
-        self.norm_out = AdaLayerNorm(
-            embedding_dim=time_embed_dim,
-            output_dim=2 * self.inner_dim,
-            norm_elementwise_affine=norm_elementwise_affine,
-            norm_eps=norm_eps,
-            chunk_dim=1,
-        )
-        self.proj_out = nn.Linear(self.inner_dim, patch_size * patch_size * out_channels)
-
-        self.gradient_checkpointing = False
-
-    def _set_gradient_checkpointing(self, module, value=False):
-        self.gradient_checkpointing = value
-
-    def forward(
-        self,
-        hidden_states,
-        timestep,
-        timestep_cond=None,
-        encoder_hidden_states: Optional[torch.Tensor] = None,
-        text_embedding_mask: Optional[torch.Tensor] = None,
-        encoder_hidden_states_t5: Optional[torch.Tensor] = None,
-        text_embedding_mask_t5: Optional[torch.Tensor] = None,
-        plucker_embedding: Optional[torch.Tensor] = None,
-        image_meta_size=None,
-        style=None,
-        image_rotary_emb: Optional[torch.Tensor] = None,
-        inpaint_latents: Optional[torch.Tensor] = None,
-        control_latents: Optional[torch.Tensor] = None,
-        ref_latents: Optional[torch.Tensor] = None,
-        clip_encoder_hidden_states: Optional[torch.Tensor] = None,
-        clip_attention_mask: Optional[torch.Tensor] = None,
-        return_dict=True,
-    ):
-        batch_size, channels, video_length, height, width = hidden_states.size()
-
-        # 1. Time embedding
-        temb = self.time_proj(timestep).to(dtype=hidden_states.dtype)
-        temb = self.time_embedding(temb, timestep_cond)
-
-        # 2. Patch embedding
-        if inpaint_latents is not None:
-            hidden_states = torch.concat([hidden_states, inpaint_latents], 1)
-        if control_latents is not None:
-            hidden_states = torch.concat([hidden_states, control_latents], 1)
-
-        hidden_states = rearrange(hidden_states, "b c f h w ->(b f) c h w")
-        hidden_states = self.proj(hidden_states)
-        hidden_states = rearrange(hidden_states, "(b f) c h w -> b c f h w", f=video_length, h=height // self.patch_size, w=width // self.patch_size)
-        hidden_states = hidden_states.flatten(2).transpose(1, 2)
-
-        encoder_hidden_states = self.text_proj(encoder_hidden_states)
-        encoder_hidden_states_t5 = self.text_proj_t5(encoder_hidden_states_t5)
-        encoder_hidden_states = torch.cat([encoder_hidden_states, encoder_hidden_states_t5], dim=1).contiguous()
-
-        clip_encoder_hidden_states = self.clip_proj(clip_encoder_hidden_states)
-        encoder_hidden_states = torch.concat([encoder_hidden_states, clip_encoder_hidden_states], dim=1)
-
-        # 3. pose embedding
-        camera_pose_hidden_states = self.pose_encoder(plucker_embedding)
-        camera_pose_hidden_states = self.pose_proj(camera_pose_hidden_states, batch_size)
-        encoder_hidden_states = torch.concat([encoder_hidden_states, camera_pose_hidden_states], dim=1)
-
-        # 4. Transformer blocks
-        for i, block in enumerate(self.transformer_blocks):
-            if self.training and self.gradient_checkpointing:
-
-                def create_custom_forward(module, return_dict=None):
-                    def custom_forward(*inputs):
-                        if return_dict is not None:
-                            return module(*inputs, return_dict=return_dict)
-                        else:
-                            return module(*inputs)
-
-                    return custom_forward
-
-                ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
-                hidden_states, encoder_hidden_states = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(block),
-                    hidden_states,
-                    encoder_hidden_states,
-                    temb,
-                    image_rotary_emb,
-                    **ckpt_kwargs,
-                )
-            else:
-                hidden_states, encoder_hidden_states = block(
-                    hidden_states=hidden_states,
-                    encoder_hidden_states=encoder_hidden_states,
-                    temb=temb,
-                    image_rotary_emb=image_rotary_emb,
-                )
-
-        hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
-        hidden_states = self.norm_final(hidden_states)
-        hidden_states = hidden_states[:, encoder_hidden_states.size()[1] :]
-
-        # 5. Final block
-        hidden_states = self.norm_out(hidden_states, temb=temb)
-        hidden_states = self.proj_out(hidden_states)
-
-        # 6. Unpatchify
-        p = self.config.patch_size
-        output = hidden_states.reshape(batch_size, video_length, height // p, width // p, channels, p, p)
-        output = output.permute(0, 4, 1, 2, 5, 3, 6).flatten(5, 6).flatten(3, 4)
-
-        if not return_dict:
-            return (output,)
-        return Transformer2DModelOutput(sample=output)
-
-    @classmethod
-    def from_pretrained_2d(
-        cls,
-        pretrained_model_path,
-        subfolder=None,
-        transformer_additional_kwargs={},
-        low_cpu_mem_usage=False,
-        torch_dtype=torch.bfloat16,
-        pose_encoder=None,
-        pose_proj=None,
-    ):
-        if subfolder is not None:
-            pretrained_model_path = os.path.join(pretrained_model_path, subfolder)
-        print(f"loaded 3D transformer's pretrained weights from {pretrained_model_path} ...")
-
-        config_file = os.path.join(pretrained_model_path, 'config.json')
-        if not os.path.isfile(config_file):
-            raise RuntimeError(f"{config_file} does not exist")
-        with open(config_file, "r") as f:
-            config = json.load(f)
-
-        from diffusers.utils import WEIGHTS_NAME
-        from safetensors.torch import load_file, safe_open
-
-        model_file_name = WEIGHTS_NAME.split('.')[0]
-        # model_file = os.path.join(pretrained_model_path, WEIGHTS_NAME)
-        # model_file_safetensors = model_file.replace(".bin", ".safetensors")
-        # 查找所有分片的 safetensors 文件
-        safetensors_pattern = os.path.join(pretrained_model_path, f'{model_file_name}*.safetensors')
-        safetensors_files = sorted(glob.glob(safetensors_pattern))
-        if not safetensors_files:
-            raise RuntimeError(f"未找到任何符合模式 {safetensors_pattern} 的 safetensors 文件")
-        # 加载并合并所有 state_dict
-        state_dict = {}
-        for file_path in safetensors_files:
-            print(f"加载分片文件: {file_path}")
-            partial_state = load_file(file_path)
-            state_dict.update(partial_state)
-
-        if low_cpu_mem_usage:
-            try:
-                import re
-                from diffusers.utils import is_accelerate_available
-                from diffusers.models.modeling_utils import load_model_dict_into_meta
-
-                if is_accelerate_available():
-                    import accelerate
-
-                # Instantiate model with empty weights
-                with accelerate.init_empty_weights():
-                    model = cls.from_config(config, **transformer_additional_kwargs)
-                    if pose_encoder:
-                        model.pose_encoder = pose_encoder
-                        model.pose_proj = pose_proj
-                param_device = "cpu"
-
-                # state_dict = load_file(model_file_safetensors)
-                model._convert_deprecated_attention_blocks(state_dict)
-                # move the params from meta device to cpu
-                missing_keys = set(model.state_dict().keys()) - set(state_dict.keys())
-                if len(missing_keys) > 0:
-                    raise ValueError(
-                        f"Cannot load {cls} from {pretrained_model_path} because the following keys are"
-                        f" missing: \n {', '.join(missing_keys)}. \n Please make sure to pass"
-                        " `low_cpu_mem_usage=False` and `device_map=None` if you want to randomly initialize"
-                        " those weights or else make sure your checkpoint file is correct."
-                    )
-                unexpected_keys = load_model_dict_into_meta(
-                    model,
-                    state_dict,
-                    device=param_device,
-                    dtype=torch_dtype,
-                    model_name_or_path=pretrained_model_path,
-                )
-                if cls._keys_to_ignore_on_load_unexpected is not None:
-                    for pat in cls._keys_to_ignore_on_load_unexpected:
-                        unexpected_keys = [k for k in unexpected_keys if re.search(pat, k) is None]
-                if len(unexpected_keys) > 0:
-                    print(f"Some weights of the model checkpoint were not used when initializing {cls.__name__}: \n {[', '.join(unexpected_keys)]}")
-                return model
-            except Exception as e:
-                print(f"The low_cpu_mem_usage mode is not work because {e}. Use low_cpu_mem_usage=False instead.")
-
-        model = cls.from_config(config, **transformer_additional_kwargs)
-        # if os.path.exists(model_file):
-        #     state_dict = torch.load(model_file, map_location="cpu")
-        # elif os.path.exists(model_file_safetensors):
-        #     from safetensors.torch import load_file, safe_open
-
-        #     state_dict = load_file(model_file_safetensors)
-        # else:
-        #     from safetensors.torch import load_file, safe_open
-
-        #     model_files_safetensors = glob.glob(os.path.join(pretrained_model_path, "*.safetensors"))
-        #     state_dict = {}
-        #     for model_file_safetensors in model_files_safetensors:
-        #         _state_dict = load_file(model_file_safetensors)
-        #         for key in _state_dict:
-        #             state_dict[key] = _state_dict[key]
-
-        if model.state_dict()['proj.weight'].size() != state_dict['proj.weight'].size():
-            new_shape = model.state_dict()['proj.weight'].size()
-            if len(new_shape) == 5:
-                state_dict['proj.weight'] = state_dict['proj.weight'].unsqueeze(2).expand(new_shape).clone()
-                state_dict['proj.weight'][:, :, :-1] = 0
-            else:
-                if model.state_dict()['proj.weight'].size()[1] > state_dict['proj.weight'].size()[1]:
-                    model.state_dict()['proj.weight'][:, : state_dict['proj.weight'].size()[1], :, :] = state_dict['proj.weight']
-                    model.state_dict()['proj.weight'][:, state_dict['proj.weight'].size()[1] :, :, :] = 0
-                    state_dict['proj.weight'] = model.state_dict()['proj.weight']
-                else:
-                    model.state_dict()['proj.weight'][:, :, :, :] = state_dict['proj.weight'][:, : model.state_dict()['proj.weight'].size()[1], :, :]
-                    state_dict['proj.weight'] = model.state_dict()['proj.weight']
-
-        tmp_state_dict = {}
-        for key in state_dict:
-            if key in model.state_dict().keys() and model.state_dict()[key].size() == state_dict[key].size():
-                tmp_state_dict[key] = state_dict[key]
-            else:
-                print(key, "Size don't match, skip")
-
-        state_dict = tmp_state_dict
-
-        m, u = model.load_state_dict(state_dict, strict=False)
-        print(f"### missing keys: {len(m)}; \n### unexpected keys: {len(u)};")
-        print(m)
-
-        if pose_encoder:
-            model.pose_encoder = pose_encoder
-            model.pose_proj = pose_proj
-
-        params = [p.numel() if "." in n else 0 for n, p in model.named_parameters()]
-        print(f"### All Parameters: {sum(params) / 1e6} M")
-
-        params = [p.numel() if "attn1." in n else 0 for n, p in model.named_parameters()]
-        print(f"### attn1 Parameters: {sum(params) / 1e6} M")
-
-        params = [p.numel() if "attn2." in n else 0 for n, p in model.named_parameters()]
-        print(f"### attn2 Parameters: {sum(params) / 1e6} M")
-
-        params = [p.numel() if ".norm" in n else 0 for n, p in model.named_parameters()]
-        print(f"### .norm Parameters: {sum(params) / 1e6} M")
-
-        params = [p.numel() if "ff." in n else 0 for n, p in model.named_parameters()]
-        print(f"### ff. Parameters: {sum(params) / 1e6} M")
-
-        params = [p.numel() if "pose_encoder." in n else 0 for n, p in model.named_parameters()]
-        print(f"### pose_encoder. Parameters: {sum(params) / 1e6} M")
-
-        params = [p.numel() if "pose_proj." in n else 0 for n, p in model.named_parameters()]
-        print(f"### pose_proj. Parameters: {sum(params) / 1e6} M")
-
-        params = [p.numel() if "clip_proj." in n else 0 for n, p in model.named_parameters()]
-        print(f"### clip_proj. Parameters: {sum(params) / 1e6} M")
 
         model = model.to(torch_dtype)
-        return model
-
-
-class EasyAnimateTransformer3DModelCameraControlV2(ModelMixin, ConfigMixin):
-    _supports_gradient_checkpointing = True
-
-    @register_to_config
-    def __init__(
-        self,
-        num_attention_heads: int = 30,
-        attention_head_dim: int = 64,
-        in_channels: Optional[int] = None,
-        out_channels: Optional[int] = None,
-        patch_size: Optional[int] = None,
-        sample_width: int = 90,
-        sample_height: int = 60,
-        ref_channels: int = None,
-        clip_channels: int = None,
-        activation_fn: str = "gelu-approximate",
-        timestep_activation_fn: str = "silu",
-        freq_shift: int = 0,
-        num_layers: int = 30,
-        mmdit_layers: int = 10000,
-        dropout: float = 0.0,
-        time_embed_dim: int = 512,
-        text_embed_dim: int = 4096,
-        text_embed_dim_t5: int = 4096,
-        norm_eps: float = 1e-5,
-        norm_elementwise_affine: bool = True,
-        flip_sin_to_cos: bool = True,
-        time_position_encoding_type: str = "3d_rope",
-        after_norm=False,
-        resize_inpaint_mask_directly: bool = False,
-        enable_clip_in_inpaint: bool = True,
-        enable_text_attention_mask: bool = True,
-        add_noise_in_inpaint_model: bool = False,
-    ):
-        super().__init__()
-        self.num_heads = num_attention_heads
-        self.inner_dim = num_attention_heads * attention_head_dim
-        self.resize_inpaint_mask_directly = resize_inpaint_mask_directly
-        self.patch_size = patch_size
-
-        post_patch_height = sample_height // patch_size
-        post_patch_width = sample_width // patch_size
-        self.post_patch_height = post_patch_height
-        self.post_patch_width = post_patch_width
-
-        self.time_proj = Timesteps(self.inner_dim, flip_sin_to_cos, freq_shift)
-        self.time_embedding = TimestepEmbedding(self.inner_dim, time_embed_dim, timestep_activation_fn)
-
-        self.proj = nn.Conv2d(in_channels, self.inner_dim, kernel_size=(patch_size, patch_size), stride=patch_size, bias=True)
-        self.text_proj = nn.Linear(text_embed_dim, self.inner_dim)
-        self.text_proj_t5 = nn.Linear(text_embed_dim_t5, self.inner_dim)
-
-        if ref_channels is not None:
-            self.ref_proj = nn.Conv2d(ref_channels, self.inner_dim, kernel_size=(patch_size, patch_size), stride=patch_size, bias=True)
-            ref_pos_embedding = get_2d_sincos_pos_embed(self.inner_dim, (post_patch_height, post_patch_width))
-            ref_pos_embedding = torch.from_numpy(ref_pos_embedding)
-            self.register_buffer("ref_pos_embedding", ref_pos_embedding, persistent=False)
-
-        if clip_channels is not None:
-            self.clip_proj = nn.Linear(clip_channels, self.inner_dim)
-
-        self.transformer_blocks = nn.ModuleList(
-            [
-                EasyAnimateDiTBlock(
-                    dim=self.inner_dim,
-                    num_attention_heads=num_attention_heads,
-                    attention_head_dim=attention_head_dim,
-                    time_embed_dim=time_embed_dim,
-                    dropout=dropout,
-                    activation_fn=activation_fn,
-                    norm_elementwise_affine=norm_elementwise_affine,
-                    norm_eps=norm_eps,
-                    after_norm=after_norm,
-                    is_mmdit_block=True if _ < mmdit_layers else False,
-                )
-                for _ in range(num_layers)
-            ]
-        )
-        self.norm_final = nn.LayerNorm(self.inner_dim, norm_eps, norm_elementwise_affine)
-
-        # 5. Output blocks
-        self.norm_out = AdaLayerNorm(
-            embedding_dim=time_embed_dim,
-            output_dim=2 * self.inner_dim,
-            norm_elementwise_affine=norm_elementwise_affine,
-            norm_eps=norm_eps,
-            chunk_dim=1,
-        )
-        self.proj_out = nn.Linear(self.inner_dim, patch_size * patch_size * out_channels)
-
-        self.gradient_checkpointing = False
-
-    def _set_gradient_checkpointing(self, module, value=False):
-        self.gradient_checkpointing = value
-
-    def forward(
-        self,
-        hidden_states,
-        timestep,
-        timestep_cond=None,
-        encoder_hidden_states: Optional[torch.Tensor] = None,
-        text_embedding_mask: Optional[torch.Tensor] = None,
-        encoder_hidden_states_t5: Optional[torch.Tensor] = None,
-        text_embedding_mask_t5: Optional[torch.Tensor] = None,
-        image_meta_size=None,
-        style=None,
-        image_rotary_emb: Optional[torch.Tensor] = None,
-        inpaint_latents: Optional[torch.Tensor] = None,
-        control_latents: Optional[torch.Tensor] = None,
-        ref_latents: Optional[torch.Tensor] = None,
-        clip_encoder_hidden_states: Optional[torch.Tensor] = None,
-        clip_attention_mask: Optional[torch.Tensor] = None,
-        return_dict=True,
-    ):
-        batch_size, channels, video_length, height, width = hidden_states.size()
-
-        # 1. Time embedding
-        temb = self.time_proj(timestep).to(dtype=hidden_states.dtype)
-        temb = self.time_embedding(temb, timestep_cond)
-
-        # 2. Patch embedding
-        if inpaint_latents is not None:
-            hidden_states = torch.concat([hidden_states, inpaint_latents], 1)
-        if control_latents is not None:
-            hidden_states = torch.concat([hidden_states, control_latents], 1)
-
-        hidden_states = rearrange(hidden_states, "b c f h w ->(b f) c h w")
-        hidden_states = self.proj(hidden_states)
-        hidden_states = rearrange(hidden_states, "(b f) c h w -> b c f h w", f=video_length, h=height // self.patch_size, w=width // self.patch_size)
-        hidden_states = hidden_states.flatten(2).transpose(1, 2)
-
-        encoder_hidden_states = self.text_proj(encoder_hidden_states)
-        if encoder_hidden_states_t5 is not None:
-            encoder_hidden_states_t5 = self.text_proj_t5(encoder_hidden_states_t5)
-            encoder_hidden_states = torch.cat([encoder_hidden_states, encoder_hidden_states_t5], dim=1).contiguous()
-
-        if ref_latents is not None:
-            ref_batch, ref_channels, ref_video_length, ref_height, ref_width = ref_latents.shape
-            ref_latents = rearrange(ref_latents, "b c f h w ->(b f) c h w")
-            ref_latents = self.ref_proj(ref_latents)
-            ref_latents = rearrange(ref_latents, "(b f) c h w -> b c f h w", f=ref_video_length, h=ref_height // self.patch_size, w=ref_width // self.patch_size)
-            ref_latents = ref_latents.flatten(2).transpose(1, 2)
-
-            emb_size = hidden_states.size()[-1]
-            ref_pos_embedding = self.ref_pos_embedding
-            ref_pos_embedding_interpolate = ref_pos_embedding.view(1, 1, self.post_patch_height, self.post_patch_width, emb_size).permute([0, 4, 1, 2, 3])
-            ref_pos_embedding_interpolate = F.interpolate(
-                ref_pos_embedding_interpolate, size=[1, height // self.config.patch_size, width // self.config.patch_size], mode='trilinear', align_corners=False
-            )
-            ref_pos_embedding_interpolate = ref_pos_embedding_interpolate.permute([0, 2, 3, 4, 1]).view(1, -1, emb_size)
-            ref_latents = ref_latents + ref_pos_embedding_interpolate
-
-            encoder_hidden_states = ref_latents
-
-        if clip_encoder_hidden_states is not None:
-            clip_encoder_hidden_states = self.clip_proj(clip_encoder_hidden_states)
-
-            encoder_hidden_states = torch.concat([clip_encoder_hidden_states, ref_latents], dim=1)
-
-        # 4. Transformer blocks
-        for i, block in enumerate(self.transformer_blocks):
-            if self.training and self.gradient_checkpointing:
-
-                def create_custom_forward(module, return_dict=None):
-                    def custom_forward(*inputs):
-                        if return_dict is not None:
-                            return module(*inputs, return_dict=return_dict)
-                        else:
-                            return module(*inputs)
-
-                    return custom_forward
-
-                ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
-                hidden_states, encoder_hidden_states = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(block),
-                    hidden_states,
-                    encoder_hidden_states,
-                    temb,
-                    image_rotary_emb,
-                    **ckpt_kwargs,
-                )
-            else:
-                hidden_states, encoder_hidden_states = block(
-                    hidden_states=hidden_states,
-                    encoder_hidden_states=encoder_hidden_states,
-                    temb=temb,
-                    image_rotary_emb=image_rotary_emb,
-                )
-
-        hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
-        hidden_states = self.norm_final(hidden_states)
-        hidden_states = hidden_states[:, encoder_hidden_states.size()[1] :]
-
-        # 5. Final block
-        hidden_states = self.norm_out(hidden_states, temb=temb)
-        hidden_states = self.proj_out(hidden_states)
-
-        # 6. Unpatchify
-        p = self.config.patch_size
-        output = hidden_states.reshape(batch_size, video_length, height // p, width // p, channels, p, p)
-        output = output.permute(0, 4, 1, 2, 5, 3, 6).flatten(5, 6).flatten(3, 4)
-
-        if not return_dict:
-            return (output,)
-        return Transformer2DModelOutput(sample=output)
-
-    @classmethod
-    def from_pretrained_2d(cls, pretrained_model_path, subfolder=None, transformer_additional_kwargs={}, low_cpu_mem_usage=False, torch_dtype=torch.bfloat16):
-        if subfolder is not None:
-            pretrained_model_path = os.path.join(pretrained_model_path, subfolder)
-        print(f"loaded 3D transformer's pretrained weights from {pretrained_model_path} ...")
-
-        config_file = os.path.join(pretrained_model_path, 'config.json')
-        if not os.path.isfile(config_file):
-            raise RuntimeError(f"{config_file} does not exist")
-        with open(config_file, "r") as f:
-            config = json.load(f)
-
-        from diffusers.utils import WEIGHTS_NAME
-
-        model = cls.from_config(config, **transformer_additional_kwargs)
-        model_file = os.path.join(pretrained_model_path, WEIGHTS_NAME)
-        model_file_safetensors = model_file.replace(".bin", ".safetensors")
-
-        if low_cpu_mem_usage:
-            try:
-                import re
-
-                from diffusers.models.modeling_utils import load_model_dict_into_meta
-                from diffusers.utils import is_accelerate_available
-
-                if is_accelerate_available():
-                    import accelerate
-
-                # Instantiate model with empty weights
-                with accelerate.init_empty_weights():
-                    model = cls.from_config(config, **transformer_additional_kwargs)
-
-                param_device = "cpu"
-                from safetensors.torch import load_file, safe_open
-
-                state_dict = load_file(model_file_safetensors)
-                model._convert_deprecated_attention_blocks(state_dict)
-                # move the params from meta device to cpu
-                missing_keys = set(model.state_dict().keys()) - set(state_dict.keys())
-                if len(missing_keys) > 0:
-                    raise ValueError(
-                        f"Cannot load {cls} from {pretrained_model_path} because the following keys are"
-                        f" missing: \n {', '.join(missing_keys)}. \n Please make sure to pass"
-                        " `low_cpu_mem_usage=False` and `device_map=None` if you want to randomly initialize"
-                        " those weights or else make sure your checkpoint file is correct."
-                    )
-
-                unexpected_keys = load_model_dict_into_meta(
-                    model,
-                    state_dict,
-                    device=param_device,
-                    dtype=torch_dtype,
-                    model_name_or_path=pretrained_model_path,
-                )
-
-                if cls._keys_to_ignore_on_load_unexpected is not None:
-                    for pat in cls._keys_to_ignore_on_load_unexpected:
-                        unexpected_keys = [k for k in unexpected_keys if re.search(pat, k) is None]
-
-                if len(unexpected_keys) > 0:
-                    print(f"Some weights of the model checkpoint were not used when initializing {cls.__name__}: \n {[', '.join(unexpected_keys)]}")
-                return model
-            except Exception as e:
-                print(f"The low_cpu_mem_usage mode is not work because {e}. Use low_cpu_mem_usage=False instead.")
-
-        model = cls.from_config(config, **transformer_additional_kwargs)
-        if os.path.exists(model_file):
-            state_dict = torch.load(model_file, map_location="cpu")
-        elif os.path.exists(model_file_safetensors):
-            from safetensors.torch import load_file, safe_open
-
-            state_dict = load_file(model_file_safetensors)
-        else:
-            from safetensors.torch import load_file, safe_open
-
-            model_files_safetensors = glob.glob(os.path.join(pretrained_model_path, "*.safetensors"))
-            state_dict = {}
-            for model_file_safetensors in model_files_safetensors:
-                _state_dict = load_file(model_file_safetensors)
-                for key in _state_dict:
-                    state_dict[key] = _state_dict[key]
-
-        if model.state_dict()['proj.weight'].size() != state_dict['proj.weight'].size():
-            new_shape = model.state_dict()['proj.weight'].size()
-            if len(new_shape) == 5:
-                state_dict['proj.weight'] = state_dict['proj.weight'].unsqueeze(2).expand(new_shape).clone()
-                state_dict['proj.weight'][:, :, :-1] = 0
-            else:
-                if model.state_dict()['proj.weight'].size()[1] > state_dict['proj.weight'].size()[1]:
-                    model.state_dict()['proj.weight'][:, : state_dict['proj.weight'].size()[1], :, :] = state_dict['proj.weight']
-                    model.state_dict()['proj.weight'][:, state_dict['proj.weight'].size()[1] :, :, :] = 0
-                    state_dict['proj.weight'] = model.state_dict()['proj.weight']
-                else:
-                    model.state_dict()['proj.weight'][:, :, :, :] = state_dict['proj.weight'][:, : model.state_dict()['proj.weight'].size()[1], :, :]
-                    state_dict['proj.weight'] = model.state_dict()['proj.weight']
-
-        tmp_state_dict = {}
-        for key in state_dict:
-            if key in model.state_dict().keys() and model.state_dict()[key].size() == state_dict[key].size():
-                tmp_state_dict[key] = state_dict[key]
-            else:
-                print(key, "Size don't match, skip")
-
-        state_dict = tmp_state_dict
-
-        m, u = model.load_state_dict(state_dict, strict=False)
-        print(f"### missing keys: {len(m)}; \n### unexpected keys: {len(u)};")
-        print(m)
-
-        params = [p.numel() if "." in n else 0 for n, p in model.named_parameters()]
-        print(f"### All Parameters: {sum(params) / 1e6} M")
-
-        params = [p.numel() if "attn1." in n else 0 for n, p in model.named_parameters()]
-        print(f"### attn1 Parameters: {sum(params) / 1e6} M")
-
         return model

@@ -108,6 +108,7 @@ from easyanimate.utils.utils import get_image_to_video_latent, save_videos_grid
 # from EasyCamera.match import get_match_points_from_dust3r
 from EasyCamera.model import EasyCamera
 from EasyCamera.tools import save_videos_set
+from EasyCamera.warp import get_mask_batch
 
 if is_wandb_available():
     import wandb
@@ -821,6 +822,161 @@ def prepare_depth_anything(dav2_model, dav2_outdoor):
     return depth_anything
 
 
+def pre_process_first_frames(first_frames, device, dtype, input_size=518):
+    # 1. 记录原图大小
+    first_frames = first_frames * 0.5 + 0.5
+    b, f, c, h, w = first_frames.shape
+    original_hw = (h, w)
+
+    # # 2. 将像素值从 0–255 转为 0–1，并转为 float
+    # frames = first_frames.float() / 255.0
+
+    # 3. 通道从 [N, H, W, C] -> [N, C, H, W]
+    # frames = frames.permute(0, 3, 1, 2)  # [batch_size, 3, 512, 512]
+    frames = rearrange(first_frames, "b f c h w -> (b f) c h w")
+
+    # 4. 缩放到指定大小 (可根据需要调整或去掉)
+    frames = F.interpolate(frames, size=(input_size, input_size), mode='bicubic', align_corners=False)
+
+    # 5. 按照给定的 mean 和 std 进行归一化
+    mean = torch.tensor([0.485, 0.456, 0.406], device=frames.device).view(1, 3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225], device=frames.device).view(1, 3, 1, 1)
+    frames = (frames - mean) / std
+
+    frames = rearrange(frames, "(b f) c h w -> b f c h w", f=f)
+
+    # 6. 放到指定的计算设备上
+    frames = frames.to(dtype=dtype, device=device)
+
+    return frames, original_hw
+
+
+def resize_mask(
+    mask: torch.Tensor, latents: torch.Tensor, process_first_frame_only: bool = True, mode: str = "trilinear", align_corners: bool = False  # (B, C, F, H, W)  # (B, C', F', H', W')
+):
+    """
+    尝试复刻您原先的逻辑:
+      1) 如果 process_first_frame_only=True，则只把 mask 的第 0 帧插值到目标 F' 维度=1 的大小，
+         其它帧插值到 F' - 1，然后拼起来。
+      2) 否则一次性插值到 (F', H', W')。
+
+    注意: 这里假设 mask.shape = (B, C, F, H, W)；latents.shape = (B, C', F', H', W')。
+    """
+    b, c, f, h, w = mask.shape
+    _, _, f2, h2, w2 = latents.shape
+
+    if process_first_frame_only:
+        # 目标尺寸先复制一下
+        target_size = [f2, h2, w2]
+
+        # 先处理第 0 帧 => 目标 F 方向固定为 1
+        target_size_first = [1, h2, w2]
+        mask_first = mask[:, :, 0:1, :, :]  # (B, C, 1, H, W)
+        resized_first = F.interpolate(mask_first.float(), size=target_size_first, mode=mode, align_corners=align_corners)  # (B, C, 1, H2, W2)
+
+        # 接着处理剩余帧 => F 维度 = f2 - 1
+        if f2 > 1:
+            target_size_rest = [f2 - 1, h2, w2]
+            mask_rest = mask[:, :, 1:, :, :]  # (B, C, F-1, H, W)
+            resized_rest = F.interpolate(mask_rest.float(), size=target_size_rest, mode=mode, align_corners=align_corners)  # (B, C, f2 - 1, H2, W2)
+
+            # 拼起来 => (B, C, f2, H2, W2)
+            resized_mask = torch.cat([resized_first, resized_rest], dim=2)
+        else:
+            resized_mask = resized_first
+    else:
+        # 一次性插值到 (f2, h2, w2)
+        resized_mask = F.interpolate(mask.float(), size=(f2, h2, w2), mode=mode, align_corners=align_corners)
+
+    return resized_mask
+
+
+def add_noise_to_reference_video(image: torch.Tensor, ratio: float = None, mean: float = -3.0, std: float = 0.5) -> torch.Tensor:
+    """
+    给 reference video（形如 (B, ...) 的张量）添加噪声。
+
+    参数：
+    • image:           形状 (B, [...])，例如 (B, F, C, H, W)。默认会对 batch 维度逐个随机生成噪声强度。
+    • ratio:           如果为 None，则使用 lognormal 分布生成 sigma；否则将使用固定的 ratio 作为 sigma。
+    • mean, std:       当 ratio 为 None 时，sigma 的 log空间服从的正态分布 N(mean, std) 的参数。
+
+    返回：
+    • 加完噪声后的图像，形状与输入相同。对于 image == -1 的位置，不添加噪声（噪声置 0）。
+    """
+    device = image.device
+    dtype = image.dtype
+    batch_size = image.shape[0]
+
+    # 1. 如果 ratio=None，则随机生成一个 lognormal 分布的噪声强度 sigma (B,)
+    if ratio is None:
+        # 生成服从 N(mean, std) 的随机数，然后取 exp => lognormal
+        sigma = torch.normal(mean=mean, std=std, size=(batch_size,), device=device, dtype=dtype)
+        sigma = sigma.exp()  # (B,)
+    else:
+        # ratio 不是 None，直接当作固定噪声强度
+        # 假设 ratio 是一个标量；若需要支持 ratio 为张量，可在此做更多检查与广播
+        sigma = torch.full((batch_size,), ratio, device=device, dtype=dtype)
+
+    # 2. 生成与 image 同形状的噪声，再乘以各自的 sigma
+    #    sigma.view(batch_size, 1, 1, 1, 1) 保证可以广播到 image 的所有维度 (B,F,C,H,W)
+    #    如果您有其他维度格式，需要自行修改这里的广播
+    shape_ones = [1] * (image.ndim - 1)  # 减去 batch 维度后剩余的维度数量
+    image_noise = torch.randn_like(image) * sigma.view(batch_size, *shape_ones)
+
+    # 3. 对于 image == -1 的位置不加噪声 => 即把噪声置 0
+    image_noise = torch.where(image == -1, torch.zeros_like(image_noise), image_noise)
+
+    # 4. 最终结果
+    return image + image_noise
+
+
+def get_inpaint_latents_from_depth(
+    depths: torch.Tensor,  # torch.Size([1, 49, 512, 512])
+    first_frames: torch.Tensor,  # torch.Size([1, 49, 3, 512, 512])
+    camera_poses: torch.Tensor,  # (B, F, 19)
+    ori_hs: torch.Tensor,  # (B,)
+    ori_ws: torch.Tensor,  # (B,)
+    video_sample_size: int,  # 512
+    pixel_values: torch.Tensor,  # (B, F, 3, 512, 512)
+    weight_dtype,
+    accelerator_device,
+    latents: torch.Tensor,  # (B, 16, 13, 64, 64)
+    vae,
+):
+    mask, warped = get_mask_batch(first_frames, depths, camera_poses, ori_hs, ori_ws, video_sample_size)  # => torch.Size([1, 49, 512, 512]), torch.Size([1, 49, 3, 512, 512])
+    mask_for_pixel = mask.unsqueeze(2)  # torch.Size([1, 49, 1, 512, 512])
+    mask_pixel_values = pixel_values * (mask_for_pixel < 0.5) + torch.ones_like(pixel_values) * (mask_for_pixel > 0.5) * -1  # torch.Size([1, 49, 3, 512, 512])
+    warped = warped / 255.0
+    warped = warped * 2.0 - 1.0
+
+    # mask_warped = warped * (1 - mask_for_pixel) + (-1) * mask_for_pixel
+    mask_warped = warped * (mask_for_pixel < 0.5) + torch.ones_like(warped) * (mask_for_pixel > 0.5) * -1
+    mask_warped = mask_warped.to(accelerator_device, dtype=weight_dtype)  # torch.Size([1, 49, 3, 512, 512])
+
+    mask_all_ones = (mask == 1).reshape(mask.shape[0], -1).all(dim=1)  # (B,)
+    rand_values = torch.rand_like(mask_all_ones.float())
+    # 当 mask_all_ones=True 且 rand<0.9 => flag=0，否则=1
+    t2v_flag = torch.where(
+        (mask_all_ones & (rand_values < 0.9)),
+        torch.zeros_like(mask_all_ones, dtype=mask_all_ones.dtype),
+        torch.ones_like(mask_all_ones, dtype=mask_all_ones.dtype),
+    )
+    # 转到指定设备
+    t2v_flag = t2v_flag.to(accelerator_device, dtype=weight_dtype)
+
+    # 4. 编码 mask，本质上就是 1-mask 并缩放到与 latents 同尺寸
+    #    先把 mask 从 (B, F, H, W) -> (B, 1, F, H, W)
+    mask_reshape = rearrange(mask, "b f h w -> b 1 f h w")  # torch.Size([1, 1, 49, 512, 512])
+    mask_reshape = 1 - mask_reshape
+    mask_reshape = resize_mask(mask_reshape, latents, vae.cache_mag_vae)  # torch.Size([1, 1, 13, 64, 64])
+
+    # 5. 可选：对原视频添加噪声
+    mask_pixel_values_with_noise = add_noise_to_reference_video(mask_warped)  # torch.Size([1, 49, 3, 512, 512])
+    # mask_pixel_values_with_noise = mask_warped  # torch.Size([1, 49, 3, 512, 512])
+
+    return t2v_flag, mask_pixel_values_with_noise, mask, mask_reshape, mask_pixel_values, mask_warped
+
+
 def main():
     args = parse_args()
 
@@ -955,16 +1111,14 @@ def main():
             args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision, variant=args.variant, vae_additional_kwargs=OmegaConf.to_container(config['vae_kwargs'])
         )
 
+        # Get DepthAnythingV2
+        depth_anything = prepare_depth_anything(config['depth_anything_kwargs']['dav2_model'], config['depth_anything_kwargs']['dav2_outdoor'])
+
     # Get Transformer
     Choosen_Transformer3DModel = name_to_transformer3d[config['transformer_additional_kwargs'].get('transformer_type', 'Transformer3DModel')]
     transformer3d = Choosen_Transformer3DModel.from_pretrained_2d(
         args.pretrained_model_name_or_path, subfolder="transformer", transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs'])
     )
-
-    # Get DepthAnythingV2
-    depth_anything = prepare_depth_anything(config['depth_anything_kwargs']['dav2_model'], config['depth_anything_kwargs']['dav2_outdoor'])
-
-    easycamera = EasyCamera(transformer3d, depth_anything)
 
     # Get Image encoder
     if args.train_mode != "normal" and config['transformer_additional_kwargs'].get('enable_clip_in_inpaint', True):
@@ -979,9 +1133,9 @@ def main():
     text_encoder.requires_grad_(False)
     if config['text_encoder_kwargs'].get('enable_multi_text_encoder', False):
         text_encoder_2.requires_grad_(False)
-    # transformer3d.requires_grad_(False)
-    # depth_anything.requires_grad_(False)
-    easycamera.requires_grad_(False)
+    transformer3d.requires_grad_(False)
+    depth_anything.requires_grad_(False)
+    # easycamera.requires_grad_(False)
     if args.train_mode != "normal" and config['transformer_additional_kwargs'].get('enable_clip_in_inpaint', True):
         image_encoder.requires_grad_(False)
 
@@ -996,8 +1150,8 @@ def main():
             state_dict = torch.load(args.transformer_path, map_location="cpu")
         state_dict = state_dict["state_dict"] if "state_dict" in state_dict else state_dict
 
-        # m, u = transformer3d.load_state_dict(state_dict, strict=False)
-        m, u = easycamera.easyanimate.load_state_dict(state_dict, strict=False)
+        m, u = transformer3d.load_state_dict(state_dict, strict=False)
+        # m, u = easycamera.easyanimate.load_state_dict(state_dict, strict=False)
         print(f"missing keys: {len(m)}, unexpected keys: {len(u)}")
 
     if args.vae_path is not None:
@@ -1016,10 +1170,10 @@ def main():
     # A good trainable modules is showed below now.
     # transformer3d.train()
     # depth_anything.train()
-    easycamera.train()
+    transformer3d.train()
     if accelerator.is_main_process:
         accelerator.print(f"Trainable modules '{args.trainable_modules}'.")
-    for name, param in easycamera.named_parameters():
+    for name, param in transformer3d.named_parameters():
         for trainable_module_name in args.trainable_modules + args.trainable_modules_low_learning_rate:
             if trainable_module_name in name:
                 param.requires_grad = True
@@ -1103,8 +1257,8 @@ def main():
         accelerator.register_save_state_pre_hook(save_model_hook)
         accelerator.register_load_state_pre_hook(load_model_hook)
 
-    # if args.gradient_checkpointing:
-    #     easycamera.enable_gradient_checkpointing()
+    if args.gradient_checkpointing:
+        transformer3d.enable_gradient_checkpointing()
     # depth_anything.enable_gradient_checkpointing()
 
     # Enable TF32 for faster training on Ampere GPUs,
@@ -1134,13 +1288,13 @@ def main():
         optimizer_cls = torch.optim.AdamW
 
     # Select trainable params
-    trainable_params = list(filter(lambda p: p.requires_grad, easycamera.parameters()))
+    trainable_params = list(filter(lambda p: p.requires_grad, transformer3d.parameters()))
     trainable_params_optim = [
         {'params': [], 'lr': args.learning_rate},
         {'params': [], 'lr': args.learning_rate / 2},
     ]
     in_already = []
-    for name, param in easycamera.named_parameters():
+    for name, param in transformer3d.named_parameters():
         high_lr_flag = False
         if name in in_already:
             continue
@@ -1218,7 +1372,7 @@ def main():
     )
 
     # Prepare everything with our `accelerator`.
-    easycamera, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(easycamera, optimizer, train_dataloader, lr_scheduler)
+    transformer3d, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(transformer3d, optimizer, train_dataloader, lr_scheduler)
 
     # if args.use_ema:
     #     ema_transformer3d.to(accelerator.device)
@@ -1227,6 +1381,7 @@ def main():
     vae.to(accelerator.device, dtype=weight_dtype)
     if args.train_mode != "normal" and config['transformer_additional_kwargs'].get('enable_clip_in_inpaint', True):
         image_encoder.to(accelerator.device, dtype=weight_dtype)
+    transformer3d.to(accelerator.device, dtype=weight_dtype)
     if not args.enable_text_encoder_in_dataloader:
         text_encoder.to(accelerator.device)
         if config['text_encoder_kwargs'].get('enable_multi_text_encoder', False):
@@ -1338,25 +1493,13 @@ def main():
             #             pixel_value = pixel_value[None, ...]
             #             Image.fromarray(np.uint8(clip_pixel_value)).save(f"{args.output_dir}/sanity_check/clip_{gif_name[:10] if not text == '' else f'{global_step}-{idx}'}.png")
 
-            with accelerator.accumulate(easycamera):
+            with accelerator.accumulate(transformer3d):
 
                 pixel_values = batch["pixel_values"].to(weight_dtype)  # torch.Size([2, 49, 3, 512, 512])
                 first_frames = batch["clip_pixel_values"]  # torch.Size([2, 512, 512, 3])
                 camera_poses = batch["camera_poses"]  # torch.Size([2, 49, 19])
                 ori_hs = batch["ori_h"]  # tensor([720, 720], device='cuda:0')
                 ori_ws = batch["ori_w"]  # tensor([1280, 1280], device='cuda:0')
-
-                # mask = []
-
-                # numpy_clip_pixel_values = clip_pixel_values.numpy()
-                # depths = depth_anything.infer_image(numpy_clip_pixel_values[..., ::-1].copy())
-
-                # for numpy_clip_pixel_value, depth, camera_pose, ori_h, ori_w in zip(numpy_clip_pixel_values, depths, camera_poses, ori_hs, ori_ws):
-                #     one_mask = get_mask_and_mask_pixel_value(numpy_clip_pixel_value, depth, camera_pose, ori_h, ori_w, args.video_sample_size)
-                #     mask.append(one_mask)
-
-                # mask = torch.tensor(mask, dtype=torch.uint8)
-                # mask_pixel_values = pixel_values * (1 - mask) + torch.ones_like(pixel_values) * -1 * mask
 
                 # # Make the inpaint latents to be zeros.
                 # if args.train_mode != "normal":
@@ -1372,11 +1515,42 @@ def main():
                 # Reduce the vram by offload vae and text encoders
                 if args.low_vram:
                     torch.cuda.empty_cache()
+                    depth_anything.to(accelerator.device)
+                    vae.to('cpu')
+                    if not args.enable_text_encoder_in_dataloader:
+                        text_encoder.to('cpu')
+                        if text_encoder_2 is not None:
+                            text_encoder_2.to('cpu')
+
+                first_frames_processed, (h, w) = pre_process_first_frames(first_frames, accelerator.device, weight_dtype)  # 2,3,518,518
+                first_frames_processed = rearrange(first_frames_processed, "b f c h w -> (b f) c h w")
+                depths = depth_anything.forward(first_frames_processed)  # torch.Size([2, 518, 518])
+                depths = F.interpolate(depths.unsqueeze(1), (h, w), mode="bilinear", align_corners=True).squeeze(1)  # torch.Size([2, 512, 512])
+                depths = rearrange(depths, "(b f) h w -> b f h w", f=video_length)  # torch.Size([1, 49, 512, 512])
+
+                t2v_flag, mask_pixel_values_with_noise, mask, mask_reshape, mask_pixel_values, mask_warped = get_inpaint_latents_from_depth(
+                    depths,
+                    first_frames,
+                    camera_poses,
+                    ori_hs,
+                    ori_ws,
+                    args.video_sample_size,
+                    pixel_values,  # (B, F, 3, 512, 512)
+                    weight_dtype,
+                    accelerator.device,
+                    latents,  # (B, 16, 13, 64, 64)
+                    vae,
+                )
+
+                # Reduce the vram by offload vae and text encoders
+                if args.low_vram:
+                    depth_anything.to('cpu')
+                    torch.cuda.empty_cache()
                     vae.to(accelerator.device)
                     if not args.enable_text_encoder_in_dataloader:
-                        text_encoder.to(accelerator.device)
+                        text_encoder.to('cpu')
                         if text_encoder_2 is not None:
-                            text_encoder_2.to(accelerator.device)
+                            text_encoder_2.to('cpu')
 
                 with torch.no_grad():
                     video_length = pixel_values.shape[1]
@@ -1413,38 +1587,19 @@ def main():
                             latents = _batch_encode_vae(pixel_values)
                             # gt_latents = _batch_encode_vae(ground_truth)
                             gt_latents = latents.detach().clone()
+                            mask_latents = _batch_encode_vae(mask_pixel_values_with_noise)  # torch.Size([1, 16, 13, 64, 64])
                     else:
                         latents = _batch_encode_vae(pixel_values)
                         # gt_latents = _batch_encode_vae(ground_truth)
                         gt_latents = latents.detach().clone()
+                        mask_latents = _batch_encode_vae(mask_pixel_values_with_noise)  # torch.Size([1, 16, 13, 64, 64])
+
                     latents = latents * vae.config.scaling_factor
                     gt_latents = gt_latents * vae.config.scaling_factor
 
-                    # if args.train_mode != "normal":
-                    # # Encode masks.
-                    # if config['transformer_additional_kwargs'].get('resize_inpaint_mask_directly', False):
-                    #     mask = rearrange(mask, "b f c h w -> b c f h w")
-                    #     mask = 1 - mask
-                    #     mask = resize_mask(mask, latents, vae.cache_mag_vae)
-                    # else:
-                    #     mask = torch.tile(mask, [1, 1, 3, 1, 1])
-                    #     if vae_stream_2 is not None:
-                    #         vae_stream_2.wait_stream(torch.cuda.current_stream())
-                    #         with torch.cuda.stream(vae_stream_2):
-                    #             mask = _batch_encode_vae(mask)
-                    #     else:
-                    #         mask = _batch_encode_vae(mask)
-
-                    # if unwrap_model(transformer3d).config.add_noise_in_inpaint_model:
-                    #     mask_pixel_values = add_noise_to_reference_video(mask_pixel_values)
-                    # # Encode inpaint latents.
-                    # mask_latents = _batch_encode_vae(mask_pixel_values)
-                    # if vae_stream_2 is not None:
-                    #     torch.cuda.current_stream().wait_stream(vae_stream_2)
-
-                    # inpaint_latents = torch.concat([mask, mask_latents], dim=1)
-                    # inpaint_latents = t2v_flag[:, None, None, None, None] * inpaint_latents
-                    # inpaint_latents = inpaint_latents * vae.config.scaling_factor
+                    inpaint_latents = torch.cat([mask_reshape, mask_latents], dim=1)  # torch.Size([1, 17, 13, 64, 64])
+                    inpaint_latents = inpaint_latents * t2v_flag.view(-1, 1, 1, 1, 1)
+                    inpaint_latents = inpaint_latents * vae.config.scaling_factor
 
                     # Encode Vision CLIP latents
                     clip_encoder_hidden_states = None
@@ -1587,31 +1742,21 @@ def main():
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
                 # Predict the noise residual
-                noise_pred, first_frames, depths, mask, mask_warped, mask_pixel_values, pixel_values = easycamera(
-                    first_frames,
-                    camera_poses,
-                    ori_hs,
-                    ori_ws,
-                    args.video_sample_size,
-                    pixel_values,
-                    weight_dtype,
-                    accelerator.device,
-                    latents,
-                    vae,
-                    args.vae_mini_batch,
-                    video_length,
+                noise_pred = transformer3d(
                     noisy_latents,
                     timesteps.to(noisy_latents.dtype),
-                    prompt_embeds,
-                    prompt_attention_mask,
-                    prompt_embeds_2,
-                    prompt_attention_mask_2,
-                    add_time_ids,
-                    style,
-                    image_rotary_emb,
-                    clip_encoder_hidden_states,
-                    clip_attention_mask,
-                )
+                    encoder_hidden_states=prompt_embeds,
+                    text_embedding_mask=prompt_attention_mask,
+                    encoder_hidden_states_t5=prompt_embeds_2,
+                    text_embedding_mask_t5=prompt_attention_mask_2,
+                    image_meta_size=add_time_ids,
+                    style=style,
+                    image_rotary_emb=image_rotary_emb,
+                    inpaint_latents=inpaint_latents if args.train_mode != "normal" else None,
+                    clip_encoder_hidden_states=clip_encoder_hidden_states if args.train_mode != "normal" else None,
+                    clip_attention_mask=clip_attention_mask if args.train_mode != "normal" else None,
+                    return_dict=False,
+                )[0]
                 if epoch == first_epoch and step % 100 == 0 and accelerator.is_main_process:
                     save_videos_set(first_frames, depths, mask, mask_warped, mask_pixel_values, pixel_values, os.path.join(args.output_dir, f"sanity_check-{global_step}"))
 
@@ -1789,7 +1934,7 @@ def main():
 
                     if not args.use_deepspeed and args.report_model_info and accelerator.is_main_process:
                         if trainable_params_total_norm > 1 and global_step > args.abnormal_norm_clip_start:
-                            for name, param in easycamera.named_parameters():
+                            for name, param in transformer3d.named_parameters():
                                 if param.requires_grad:
                                     writer.add_scalar(f'gradients/before_clip_norm/{name}', param.grad.norm(), global_step=global_step)
 
