@@ -30,7 +30,7 @@ accelerate launch \
   --lr_scheduler="constant_with_warmup" \
   --lr_warmup_steps=100 \
   --seed=42 \
-  --output_dir="output_dir_20250222_inpainting_with_depth_transformer" \
+  --output_dir="output_dir_20250226_inpainting_with_depth_attn1_indoor" \
   --gradient_checkpointing \
   --mixed_precision="bf16" \
   --adam_weight_decay=5e-3 \

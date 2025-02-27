@@ -20,7 +20,7 @@ text_encoder_kwargs:
 
 depth_anything_kwargs:
   dav2_model: vitl
-  dav2_outdoor: true
+  dav2_outdoor: false
 
 loss_weights:
   lambda_diffusion: 1

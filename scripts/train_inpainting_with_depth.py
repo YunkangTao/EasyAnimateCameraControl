@@ -1322,21 +1322,21 @@ def main():
         batch_sampler.sampler.generator = torch.Generator().manual_seed(args.seed + epoch)
         for step, batch in enumerate(train_dataloader):
             # Data batch sanity check
-            if epoch == first_epoch and step == 0:
-                pixel_values, texts = batch['pixel_values'].cpu(), batch['text']
-                pixel_values = rearrange(pixel_values, "b f c h w -> b c f h w")
-                if pixel_values.ndim == 4:
-                    pixel_values = pixel_values.unsqueeze(2)
-                os.makedirs(os.path.join(args.output_dir, "sanity_check"), exist_ok=True)
-                for idx, (pixel_value, text) in enumerate(zip(pixel_values, texts)):
-                    pixel_value = pixel_value[None, ...]
-                    gif_name = '-'.join(text.replace('/', '').split()[:10]) if not text == '' else f'{global_step}-{idx}'
-                    save_videos_grid(pixel_value, f"{args.output_dir}/sanity_check/{gif_name[:10]}.gif", rescale=True)
-                if args.train_mode != "normal":
-                    clip_pixel_values, texts = batch['clip_pixel_values'].cpu(), batch['text']
-                    for idx, (clip_pixel_value, text) in enumerate(zip(clip_pixel_values, texts)):
-                        pixel_value = pixel_value[None, ...]
-                        Image.fromarray(np.uint8(clip_pixel_value)).save(f"{args.output_dir}/sanity_check/clip_{gif_name[:10] if not text == '' else f'{global_step}-{idx}'}.png")
+            # if epoch == first_epoch and step == 0:
+            #     pixel_values, texts = batch['pixel_values'].cpu(), batch['text']
+            #     pixel_values = rearrange(pixel_values, "b f c h w -> b c f h w")
+            #     if pixel_values.ndim == 4:
+            #         pixel_values = pixel_values.unsqueeze(2)
+            #     os.makedirs(os.path.join(args.output_dir, "sanity_check"), exist_ok=True)
+            #     for idx, (pixel_value, text) in enumerate(zip(pixel_values, texts)):
+            #         pixel_value = pixel_value[None, ...]
+            #         gif_name = '-'.join(text.replace('/', '').split()[:10]) if not text == '' else f'{global_step}-{idx}'
+            #         save_videos_grid(pixel_value, f"{args.output_dir}/sanity_check/{gif_name[:10]}.gif", rescale=True)
+            #     if args.train_mode != "normal":
+            #         clip_pixel_values, texts = batch['clip_pixel_values'].cpu(), batch['text']
+            #         for idx, (clip_pixel_value, text) in enumerate(zip(clip_pixel_values, texts)):
+            #             pixel_value = pixel_value[None, ...]
+            #             Image.fromarray(np.uint8(clip_pixel_value)).save(f"{args.output_dir}/sanity_check/clip_{gif_name[:10] if not text == '' else f'{global_step}-{idx}'}.png")
 
             with accelerator.accumulate(easycamera):
 

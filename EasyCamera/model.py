@@ -342,9 +342,31 @@ def get_inpaint_latents_from_depth(
 
         @staticmethod
         def backward(ctx, grad_output):
-            # 采用直通估计，将上游传来的梯度直接返回给 pixel_values
-            # 这相当于把该函数在反向传播中的梯度计算当做恒等映射
-            return grad_output
+            """
+            这里的目标是将 grad_output（来自 ModelB 的梯度，形状为 latent_shape）
+            转换成与输入 pixel_values 相同的形状（ctx.original_shape）。
+
+            以下示例中采取一种简单策略：先对 temporal 和空间维度上采样，
+            然后在通道维度上进行聚合（比如求和或平均），最后做维度重排。
+            注意：这种方法仅为示例，实际转换需要依据你具体的编码变换来设计。
+            """
+
+            # original_shape = ctx.original_shape  # [b, f, c, h, w]
+            b, f, c, h, w = 1, 49, 3, 512, 512  # 假设原始输入的形状
+
+            # 假设 grad_output 的形状为 [b, latent_c, latent_frames, latent_h, latent_w]
+            # 上采样 temporal 和空间维度到目标：目标 temporal = f, h, w 与原始像素相匹配
+            grad_up = torch.nn.functional.interpolate(grad_output, size=(f, h, w), mode="nearest")  # 现在形状变为 [b, latent_c, f, h, w]
+
+            # 假设原始在 forward 中经过了重排列：pixel_values -> rearrange("b f c h w -> b c f h w")
+            # 这里需要把通道调整到原始输入的通道数 c。
+            # 例如，可以做如下聚合（此处示例用求和）：
+            grad_channel = grad_up.sum(dim=1, keepdim=True)  # shape: [b, 1, f, h, w]
+            grad_channel = grad_channel.expand(-1, c, -1, -1, -1)  # shape: [b, c, f, h, w]
+
+            # 将梯度重排回原始输入的顺序
+            grad_input = rearrange(grad_channel, "b c f h w -> b f c h w")
+            return grad_input
 
     mask_latents1 = VAEForwardSTE.apply(mask_pixel_values_with_noise)
 
@@ -426,8 +448,10 @@ class EasyCamera(nn.Module):
         clip_attention_mask,
     ):
         first_frames_processed, (h, w) = pre_process_first_frames(first_frames, accelerator_device, weight_dtype)  # 2,3,518,518
+        first_frames_processed = rearrange(first_frames_processed, "b f c h w -> (b f) c h w")
         depths = self.depth_anything_v2.forward(first_frames_processed)  # torch.Size([2, 518, 518])
         depths = F.interpolate(depths.unsqueeze(1), (h, w), mode="bilinear", align_corners=True).squeeze(1)  # torch.Size([2, 512, 512])
+        depths = rearrange(depths, "(b f) h w -> b f h w", f=video_length)  # torch.Size([1, 49, 512, 512])
 
         inpaint_latents, mask_pixel_values, mask, mask_warped = get_inpaint_latents_from_depth(
             depths,
