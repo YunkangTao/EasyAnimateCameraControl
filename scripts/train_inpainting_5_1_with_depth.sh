@@ -3,6 +3,8 @@ export DATASET_NAME="/mnt/chenyang_lei/Datasets/easyanimate_dataset"
 export DATASET_META_NAME="/mnt/chenyang_lei/Datasets/easyanimate_dataset/realestate_dataset/metadata.json"
 export NCCL_IB_DISABLE=1
 export NCCL_P2P_DISABLE=1
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 NCCL_DEBUG=INFO
 
 # When train model with multi machines, use "--config_file accelerate.yaml" instead of "--mixed_precision='bf16'".
@@ -11,7 +13,7 @@ accelerate launch \
   --deepspeed_config_file config/zero_stage2_config.json \
   --deepspeed_multinode_launcher standard \
   --main_process_port 29501 \
-  scripts/train_lora_5.1_with_depth.py \
+  scripts/train_inpainting_5.1_with_depth.py \
   --pretrained_model_name_or_path=$MODEL_NAME \
   --train_data_dir=$DATASET_NAME \
   --train_data_meta=$DATASET_META_NAME \
@@ -27,18 +29,20 @@ accelerate launch \
   --dataloader_num_workers=8 \
   --num_train_epochs=3 \
   --checkpointing_steps=4019 \
-  --learning_rate=1e-04 \
+  --learning_rate=2e-05 \
+  --lr_scheduler="constant_with_warmup" \
+  --lr_warmup_steps=100 \
   --seed=42 \
   --low_vram \
-  --output_dir="output_dir_20250227_inpainting_with_depth_lora" \
+  --output_dir="output_dir_20250227_inpainting_with_depth_transformer" \
   --gradient_checkpointing \
   --mixed_precision="bf16" \
-  --adam_weight_decay=5e-3 \
+  --adam_weight_decay=5e-2 \
   --adam_epsilon=1e-10 \
   --vae_mini_batch=1 \
   --max_grad_norm=0.05 \
   --loss_type="flow" \
-  --use_deepspeed \
   --uniform_sampling \
-  --train_mode="inpaint"
-  --resume_from_checkpoint="latest"
+  --use_deepspeed \
+  --train_mode="inpaint" \
+  --trainable_modules "."

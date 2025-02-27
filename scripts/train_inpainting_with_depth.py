@@ -1179,80 +1179,74 @@ def main():
                 param.requires_grad = True
                 break
 
+    # Create EMA for the transformer3d.
+    if args.use_ema:
+        ema_transformer3d = Choosen_Transformer3DModel.from_pretrained_2d(
+            args.pretrained_model_name_or_path, subfolder="transformer", transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs'])
+        )
+        ema_transformer3d = EMAModel(ema_transformer3d.parameters(), model_cls=Choosen_Transformer3DModel, model_config=ema_transformer3d.config)
+
+    if args.enable_xformers_memory_efficient_attention and config['transformer_additional_kwargs'].get('transformer_type', 'Transformer3DModel') == 'Transformer3DModel':
+        if is_xformers_available():
+            import xformers
+
+            xformers_version = version.parse(xformers.__version__)
+            if xformers_version == version.parse("0.0.16"):
+                logger.warn(
+                    "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
+                )
+            transformer3d.enable_xformers_memory_efficient_attention()
+        else:
+            raise ValueError("xformers is not available. Make sure it is installed correctly")
+
     # `accelerate` 0.16.0 will have better support for customized saving
     if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
         # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
         def save_model_hook(models, weights, output_dir):
-            easycamera = models[0].module
-
             if accelerator.is_main_process:
-                easycamera.easyanimate.save_pretrained(os.path.join(output_dir, "transformer"), max_shard_size="30GB")
-                os.makedirs(os.path.join(output_dir, "dav2"), exist_ok=True)
-                torch.save(easycamera.depth_anything_v2.state_dict(), os.path.join(output_dir, "dav2", "depth_anything.pth"))
+                if args.use_ema:
+                    ema_transformer3d.save_pretrained(os.path.join(output_dir, "transformer_ema"), max_shard_size="30GB")
 
+                models[0].save_pretrained(os.path.join(output_dir, "transformer"), max_shard_size="30GB")
                 if not args.use_deepspeed:
                     weights.pop()
 
                 with open(os.path.join(output_dir, "sampler_pos_start.pkl"), 'wb') as file:
                     pickle.dump([batch_sampler.sampler._pos_start, first_epoch], file)
 
-        # 定义加载钩子函数
         def load_model_hook(models, input_dir):
-            # 检查当前是否使用 DeepSpeed
-            if accelerator.distributed_type == DistributedType.DEEPSPEED:
-                # 通过 unwrap_model 获取原始模型实例
-                easycamera = accelerator.unwrap_model(accelerator._models[0].module)
-                accelerator.print("Loading model using DeepSpeed-specific load_model_hook.")
-            else:
-                # 对于非 DeepSpeed 分布式类型，按常规方式处理
-                if len(models) == 0:
-                    accelerator.print("No models to load.")
-                    return
-                easycamera = models[0].module  # 假设 EasyCamera 是第一个模型
-
-            # 确保目录存在
-            transformer_dir = os.path.join(input_dir, "transformer")
-            depth_dir = os.path.join(input_dir, "dav2")
-
-            if not os.path.exists(transformer_dir):
-                raise FileNotFoundError(f"Transformer directory not found at {transformer_dir}")
-            if not os.path.exists(depth_dir):
-                raise FileNotFoundError(f"Dav2 directory not found at {depth_dir}")
-
-            # 加载 easyanimate 模型
-            if hasattr(easycamera.easyanimate, "from_pretrained_2d"):
-                # 假设 EasyAnimate 有一个自定义的加载方法 from_pretrained_2d
-                Choosen_Transformer3DModel = name_to_transformer3d[config['transformer_additional_kwargs'].get('transformer_type', 'Transformer3DModel')]
-                loaded_easyanimate = Choosen_Transformer3DModel.from_pretrained_2d(
-                    transformer_dir, subfolder=".", transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs'])
+            if args.use_ema:
+                ema_path = os.path.join(input_dir, "transformer_ema")
+                _, ema_kwargs = Choosen_Transformer3DModel.load_config(ema_path, return_unused_kwargs=True)
+                load_model = Choosen_Transformer3DModel.from_pretrained_2d(
+                    input_dir, subfolder="transformer_ema", transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs'])
                 )
-                easycamera.easyanimate.register_to_config(**loaded_easyanimate.config)
-                easycamera.easyanimate.load_state_dict(loaded_easyanimate.state_dict())
-                del loaded_easyanimate  # 释放内存
-            else:
-                # 如果 easyanimate 没有 from_pretrained_2d 方法，改用 torch.load
-                easyanimate_state_path = os.path.join(transformer_dir, "easyanimate.pth")
-                if os.path.exists(easyanimate_state_path):
-                    easycamera.easyanimate.load_state_dict(torch.load(easyanimate_state_path, map_location=accelerator.device))
-                else:
-                    raise FileNotFoundError(f"EasyAnimate state dict not found at {easyanimate_state_path}")
+                load_model = EMAModel(load_model.parameters(), model_cls=Choosen_Transformer3DModel, model_config=load_model.config)
+                load_model.load_state_dict(ema_kwargs)
 
-            # 加载 depth_anything_v2 的 state_dict
-            depth_state_path = os.path.join(depth_dir, "depth_anything.pth")
-            if os.path.exists(depth_state_path):
-                easycamera.depth_anything_v2.load_state_dict(torch.load(depth_state_path, map_location=accelerator.device))
-            else:
-                raise FileNotFoundError(f"DepthAnything state dict not found at {depth_state_path}")
+                ema_transformer3d.load_state_dict(load_model.state_dict())
+                ema_transformer3d.to(accelerator.device)
+                del load_model
 
-            # 加载 sampler 的状态
-            sampler_pkl_path = os.path.join(input_dir, "sampler_pos_start.pkl")
-            if os.path.exists(sampler_pkl_path):
-                with open(sampler_pkl_path, 'rb') as file:
+            for i in range(len(models)):
+                # pop models so that they are not loaded again
+                model = models.pop()
+
+                # load diffusers style into model
+                load_model = Choosen_Transformer3DModel.from_pretrained_2d(
+                    input_dir, subfolder="transformer", transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs'])
+                )
+                model.register_to_config(**load_model.config)
+
+                model.load_state_dict(load_model.state_dict())
+                del load_model
+
+            pkl_path = os.path.join(input_dir, "sampler_pos_start.pkl")
+            if os.path.exists(pkl_path):
+                with open(pkl_path, 'rb') as file:
                     loaded_number, _ = pickle.load(file)
                     batch_sampler.sampler._pos_start = max(loaded_number - args.dataloader_num_workers * accelerator.num_processes * 2, 0)
-                print(f"Loaded sampler state from {sampler_pkl_path}. Loaded number = {loaded_number}.")
-            else:
-                print(f"Sampler state file not found at {sampler_pkl_path}.")
+                print(f"Load pkl from {pkl_path}. Get loaded_number = {loaded_number}.")
 
         accelerator.register_save_state_pre_hook(save_model_hook)
         accelerator.register_load_state_pre_hook(load_model_hook)
@@ -1381,7 +1375,6 @@ def main():
     vae.to(accelerator.device, dtype=weight_dtype)
     if args.train_mode != "normal" and config['transformer_additional_kwargs'].get('enable_clip_in_inpaint', True):
         image_encoder.to(accelerator.device, dtype=weight_dtype)
-    transformer3d.to(accelerator.device, dtype=weight_dtype)
     if not args.enable_text_encoder_in_dataloader:
         text_encoder.to(accelerator.device)
         if config['text_encoder_kwargs'].get('enable_multi_text_encoder', False):

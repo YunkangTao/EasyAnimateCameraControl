@@ -1,15 +1,31 @@
 import os
-
 import numpy as np
 import torch
-from diffusers import DDIMScheduler, DPMSolverMultistepScheduler, EulerAncestralDiscreteScheduler, EulerDiscreteScheduler, FlowMatchEulerDiscreteScheduler, PNDMScheduler
+from diffusers import (
+    DDIMScheduler,
+    DPMSolverMultistepScheduler,
+    EulerAncestralDiscreteScheduler,
+    EulerDiscreteScheduler,
+    FlowMatchEulerDiscreteScheduler,
+    PNDMScheduler,
+)
 from omegaconf import OmegaConf
 from PIL import Image
-from transformers import BertModel, BertTokenizer, CLIPImageProcessor, CLIPVisionModelWithProjection, Qwen2Tokenizer, Qwen2VLForConditionalGeneration, T5EncoderModel, T5Tokenizer
+from transformers import (
+    BertModel,
+    BertTokenizer,
+    CLIPImageProcessor,
+    CLIPVisionModelWithProjection,
+    Qwen2Tokenizer,
+    Qwen2VLForConditionalGeneration,
+    T5EncoderModel,
+    T5Tokenizer,
+)
 
 from easyanimate.models import name_to_autoencoder_magvit, name_to_transformer3d
+from easyanimate.models.transformer3d import get_teacache_coefficients
 from easyanimate.pipeline.pipeline_easyanimate_inpaint import EasyAnimateInpaintPipeline
-from easyanimate.utils.fp8_optimization import convert_weight_dtype_wrapper
+from easyanimate.utils.fp8_optimization import convert_model_weight_to_float8, convert_weight_dtype_wrapper
 from easyanimate.utils.lora_utils import merge_lora, unmerge_lora
 from easyanimate.utils.utils import get_video_to_video_latent, save_videos_grid
 
@@ -23,14 +39,13 @@ from easyanimate.utils.utils import get_video_to_video_latent, save_videos_grid
 # resulting in slower speeds but saving a large amount of GPU memory.
 #
 # EasyAnimateV3 support "model_cpu_offload" "sequential_cpu_offload"
-# EasyAnimateV4, V5 support "model_cpu_offload" "model_cpu_offload_and_qfloat8" "sequential_cpu_offload"
-# EasyAnimateV5.1 support "model_cpu_offload" "model_cpu_offload_and_qfloat8"
+# EasyAnimateV4, V5 and V5.1 support "model_cpu_offload" "model_cpu_offload_and_qfloat8" "sequential_cpu_offload"
 GPU_memory_mode = "model_cpu_offload_and_qfloat8"
 # EasyAnimateV5.1 support TeaCache.
 enable_teacache = True
 # Recommended to be set between 0.05 and 0.1. A larger threshold can cache more steps, speeding up the inference process,
 # but it may cause slight differences between the generated content and the original content.
-teacache_threshold = 0.1
+teacache_threshold = 0.08
 
 # Config and model path
 config_path = "config/easyanimate_video_v5.1_magvit_qwen.yaml"
@@ -60,13 +75,17 @@ fps = 8
 # Use torch.float16 if GPU does not support torch.bfloat16
 # ome graphics cards, such as v100, 2080ti, do not support torch.bfloat16
 weight_dtype = torch.bfloat16
-# If you want to generate from text, please set the validation_image_start = None and validation_image_end = None
-validation_video = "asset/realestate8bd5cb1a874d6fb2.mp4"
+# If you are preparing to redraw the reference video, set validation_video and validation_video_mask.
+# If you do not use validation_video_mask, the entire video will be redrawn;
+# if you use validation_video_mask, as shown in asset/mask.jpg, only a portion of the video will be redrawn.
+# Please set a larger denoise_strength when using validation_video_mask, such as 1.00 instead of 0.70
+validation_video = "asset/1.mp4"
+validation_video_mask = None
 denoise_strength = 0.70
 
 # 使用更长的neg prompt如"模糊，突变，变形，失真，画面暗，文本字幕，画面固定，连环画，漫画，线稿，没有主体。"，可以增加稳定性
 # 在neg prompt中添加"安静，固定"等词语可以增加动态性。
-prompt = "一只穿着小外套的猫咪正在花园秋千上安静地弹吉他。晚霞的余光洒在它柔软的毛皮上，和煦的微风轻轻拂过，周围斑驳的光影随着音乐的旋律轻轻摇曳。"
+prompt = "一只穿着小外套的猫咪正安静地坐在花园的秋千上弹吉他。它的小外套精致而合身，增添了几分俏皮与可爱。晚霞的余光洒在它柔软的毛皮上，给它的毛发镀上了一层温暖的金色光辉。和煦的微风轻轻拂过，带来阵阵花香和草木的气息，令人心旷神怡。周围斑驳的光影随着音乐的旋律轻轻摇曳，仿佛整个花园都在为这只小猫咪的演奏伴舞。阳光透过树叶间的缝隙，投下一片片光影交错的图案，与悠扬的吉他声交织在一起，营造出一种梦幻而宁静的氛围。猫咪专注而投入地弹奏着，每一个音符都似乎充满了魔力，让这个傍晚变得更加美好。"
 negative_prompt = "扭曲的身体，肢体残缺，文本字幕，漫画，静止，丑陋，错误，乱码。"
 #
 # Using longer neg prompt such as "Blurring, mutation, deformation, distortion, dark and solid, comics, text subtitles, line art." can increase stability
@@ -85,7 +104,7 @@ config = OmegaConf.load(config_path)
 Choosen_Transformer3DModel = name_to_transformer3d[config['transformer_additional_kwargs'].get('transformer_type', 'Transformer3DModel')]
 
 transformer_additional_kwargs = OmegaConf.to_container(config['transformer_additional_kwargs'])
-if weight_dtype == torch.float16:
+if weight_dtype == torch.float16 and "v5.1" not in model_name.lower():
     transformer_additional_kwargs["upcast_attention"] = True
 
 transformer = Choosen_Transformer3DModel.from_pretrained_2d(
@@ -125,7 +144,7 @@ if motion_module_path is not None:
 # Get Vae
 Choosen_AutoencoderKL = name_to_autoencoder_magvit[config['vae_kwargs'].get('vae_type', 'AutoencoderKL')]
 vae = Choosen_AutoencoderKL.from_pretrained(model_name, subfolder="vae", vae_additional_kwargs=OmegaConf.to_container(config['vae_kwargs'])).to(weight_dtype)
-if config['vae_kwargs'].get('vae_type', 'AutoencoderKL') == 'AutoencoderKLMagvit' and weight_dtype == torch.float16:
+if weight_dtype == torch.float16 and "v5.1" not in model_name.lower():
     vae.upcast_vae = True
 
 if vae_path is not None:
@@ -205,16 +224,28 @@ pipeline = EasyAnimateInpaintPipeline(
 )
 
 if GPU_memory_mode == "sequential_cpu_offload":
+    pipeline._manual_cpu_offload_in_sequential_cpu_offload = []
+    for name, _text_encoder in zip(["text_encoder", "text_encoder_2"], [pipeline.text_encoder, pipeline.text_encoder_2]):
+        if isinstance(_text_encoder, Qwen2VLForConditionalGeneration):
+            if hasattr(_text_encoder, "visual"):
+                del _text_encoder.visual
+            convert_model_weight_to_float8(_text_encoder)
+            convert_weight_dtype_wrapper(_text_encoder, weight_dtype)
+            pipeline._manual_cpu_offload_in_sequential_cpu_offload = [name]
     pipeline.enable_sequential_cpu_offload()
 elif GPU_memory_mode == "model_cpu_offload_and_qfloat8":
+    for _text_encoder in [pipeline.text_encoder, pipeline.text_encoder_2]:
+        if hasattr(_text_encoder, "visual"):
+            del _text_encoder.visual
+    convert_weight_dtype_wrapper(transformer, weight_dtype)
     pipeline.enable_model_cpu_offload()
-    convert_weight_dtype_wrapper(pipeline.transformer, weight_dtype)
 else:
     pipeline.enable_model_cpu_offload()
 
-if "v5.1" in config_path and enable_teacache:
+coefficients = get_teacache_coefficients(model_name)
+if coefficients is not None and enable_teacache:
     print(f"Enable TeaCache with threshold: {teacache_threshold}.")
-    pipeline.transformer.enable_teacache(num_inference_steps, teacache_threshold)
+    pipeline.transformer.enable_teacache(num_inference_steps, teacache_threshold, coefficients=coefficients)
 
 generator = torch.Generator(device="cuda").manual_seed(seed)
 
@@ -225,7 +256,9 @@ if vae.cache_mag_vae:
     video_length = int((video_length - 1) // vae.mini_batch_encoder * vae.mini_batch_encoder) + 1 if video_length != 1 else 1
 else:
     video_length = int(video_length // vae.mini_batch_encoder * vae.mini_batch_encoder) if video_length != 1 else 1
-input_video, input_video_mask, clip_image = get_video_to_video_latent(validation_video, video_length=video_length, fps=fps, sample_size=sample_size)
+input_video, input_video_mask, clip_image = get_video_to_video_latent(
+    validation_video, video_length=video_length, fps=fps, validation_video_mask=validation_video_mask, sample_size=sample_size
+)
 
 with torch.no_grad():
     sample = pipeline(

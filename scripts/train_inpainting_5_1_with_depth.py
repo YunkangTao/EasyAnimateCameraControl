@@ -17,7 +17,6 @@
 # See the License for the specific language governing permissions and
 
 import argparse
-import copy
 import gc
 import logging
 import math
@@ -48,6 +47,7 @@ from huggingface_hub import create_repo, upload_folder
 from omegaconf import OmegaConf
 from packaging import version
 from PIL import Image
+from torch.utils.data import RandomSampler
 from torch.utils.tensorboard import SummaryWriter
 from torchvision import transforms
 from tqdm.auto import tqdm
@@ -71,12 +71,11 @@ project_roots = [os.path.dirname(current_file_path), os.path.dirname(os.path.dir
 for project_root in project_roots:
     sys.path.insert(0, project_root) if project_root not in sys.path else None
 
-from easyanimate.data.bucket_sampler import RandomSampler
-
 from easyanimate.data.bucket_sampler import (
     ASPECT_RATIO_512,
     ASPECT_RATIO_RANDOM_CROP_512,
     ASPECT_RATIO_RANDOM_CROP_PROB,
+    AspectRatioBatchImageSampler,
     AspectRatioBatchImageVideoSampler,
     RandomSampler,
     get_closest_ratio,
@@ -87,14 +86,15 @@ from easyanimate.data.dataset_inpainting_with_depth import (
     VideoSamplerWithDepth,
 )
 from easyanimate.models import name_to_autoencoder_magvit, name_to_transformer3d
+from easyanimate.pipeline.pipeline_easyanimate import EasyAnimatePipeline
 from easyanimate.pipeline.pipeline_easyanimate import EasyAnimatePipeline, get_2d_rotary_pos_embed, get_3d_rotary_pos_embed, get_resize_crop_region_for_grid
-from easyanimate.pipeline.pipeline_easyanimate_inpaint import EasyAnimateInpaintPipeline, add_noise_to_reference_video, resize_mask
+from easyanimate.pipeline.pipeline_easyanimate_inpaint import EasyAnimateInpaintPipeline
 from easyanimate.utils import gaussian_diffusion as gd
 from easyanimate.utils.discrete_sampler import DiscreteSampling
-from easyanimate.utils.lora_utils import create_network, merge_lora, unmerge_lora
 from easyanimate.utils.respace import SpacedDiffusion, space_timesteps
 from easyanimate.utils.utils import get_image_to_video_latent, save_videos_grid
 from EasyCamera.tools import save_videos_set
+from EasyCamera.warp import get_mask_batch
 
 if is_wandb_available():
     import wandb
@@ -251,9 +251,7 @@ check_min_version("0.18.0.dev0")
 logger = get_logger(__name__, log_level="INFO")
 
 
-def log_validation(
-    vae, text_encoder, text_encoder_2, tokenizer, tokenizer_2, transformer3d, image_encoder, image_processor, network, config, args, accelerator, weight_dtype, global_step
-):
+def log_validation(vae, text_encoder, text_encoder_2, tokenizer, tokenizer_2, transformer3d, image_encoder, image_processor, config, args, accelerator, weight_dtype, global_step):
     try:
         logger.info("Running validation... ")
 
@@ -293,7 +291,6 @@ def log_validation(
                 scheduler=scheduler,
             )
         pipeline = pipeline.to(weight_dtype, accelerator.device)
-        pipeline = merge_lora(pipeline, None, 1, accelerator.device, state_dict=accelerator.unwrap_model(network).state_dict(), transformer_only=True)
 
         if args.enable_xformers_memory_efficient_attention and config['transformer_additional_kwargs'].get('transformer_type', 'Transformer3DModel') == 'Transformer3DModel':
             pipeline.enable_xformers_memory_efficient_attention()
@@ -632,23 +629,6 @@ def parse_args():
         ),
     )
 
-    parser.add_argument(
-        "--rank",
-        type=int,
-        default=128,
-        help=("The dimension of the LoRA update matrices."),
-    )
-    parser.add_argument(
-        "--network_alpha",
-        type=int,
-        default=64,
-        help=("The dimension of the LoRA update matrices."),
-    )
-    parser.add_argument(
-        "--train_text_encoder",
-        action="store_true",
-        help="Whether to train the text encoder. If set, the text encoder should be float32 precision.",
-    )
     parser.add_argument("--snr_loss", action="store_true", help="Whether or not to use snr_loss.")
     parser.add_argument("--uniform_sampling", action="store_true", help="Whether or not to use uniform_sampling.")
     parser.add_argument(
@@ -677,15 +657,15 @@ def parse_args():
     parser.add_argument("--motion_sub_loss", action="store_true", help="Whether enable motion sub loss.")
     parser.add_argument("--motion_sub_loss_ratio", type=float, default=0.25, help="The ratio of motion sub loss.")
     parser.add_argument(
-        "--keep_all_node_same_token_length",
-        action="store_true",
-        help="Reference of the length token.",
-    )
-    parser.add_argument(
         "--train_sampling_steps",
         type=int,
         default=1000,
         help="Run train_sampling_steps.",
+    )
+    parser.add_argument(
+        "--keep_all_node_same_token_length",
+        action="store_true",
+        help="Reference of the length token.",
     )
     parser.add_argument(
         "--token_sample_size",
@@ -724,12 +704,6 @@ def parse_args():
         help="Num of repeat video.",
     )
     parser.add_argument(
-        "--image_repeat_in_forward",
-        type=int,
-        default=0,
-        help="Num of repeat image in forward.",
-    )
-    parser.add_argument(
         "--config_path",
         type=str,
         default=None,
@@ -747,8 +721,9 @@ def parse_args():
         default=None,
         help=("If you want to load the weight from other vaes, input its path."),
     )
-    parser.add_argument("--save_state", action="store_true", help="Whether or not to save state.")
 
+    parser.add_argument('--trainable_modules', nargs='+', help='Enter a list of trainable modules')
+    parser.add_argument('--trainable_modules_low_learning_rate', nargs='+', default=[], help='Enter a list of trainable modules with lower learning rate')
     parser.add_argument('--tokenizer_max_length', type=int, default=256, help='Max length of tokenizer')
     parser.add_argument("--use_deepspeed", action="store_true", help="Whether or not to use deepspeed.")
     parser.add_argument("--low_vram", action="store_true", help="Whether enable low_vram mode.")
@@ -855,7 +830,7 @@ def pre_process_first_frames(first_frames, device, dtype, input_size=518):
 
 
 def resize_mask(
-    mask: torch.Tensor, latents: torch.Tensor, process_first_frame_only: bool = True, mode: str = "trilinear", align_corners: bool = False  # (B, C, F, H, W)  # (B, C', F', H', W')
+    mask: torch.Tensor, latents_shape: list, process_first_frame_only: bool = True, mode: str = "trilinear", align_corners: bool = False  # (B, C, F, H, W)  # (B, C', F', H', W')
 ):
     """
     尝试复刻您原先的逻辑:
@@ -866,7 +841,7 @@ def resize_mask(
     注意: 这里假设 mask.shape = (B, C, F, H, W)；latents.shape = (B, C', F', H', W')。
     """
     b, c, f, h, w = mask.shape
-    _, _, f2, h2, w2 = latents.shape
+    _, _, f2, h2, w2 = latents_shape
 
     if process_first_frame_only:
         # 目标尺寸先复制一下
@@ -943,8 +918,8 @@ def get_inpaint_latents_from_depth(
     pixel_values: torch.Tensor,  # (B, F, 3, 512, 512)
     weight_dtype,
     accelerator_device,
-    latents: torch.Tensor,  # (B, 16, 13, 64, 64)
-    vae,
+    latents_shape: list,  # (B, 16, 13, 64, 64)
+    vae_cache_mag_vae,
 ):
     mask, warped = get_mask_batch(first_frames, depths, camera_poses, ori_hs, ori_ws, video_sample_size)  # => torch.Size([1, 49, 512, 512]), torch.Size([1, 49, 3, 512, 512])
     mask_for_pixel = mask.unsqueeze(2)  # torch.Size([1, 49, 1, 512, 512])
@@ -971,7 +946,7 @@ def get_inpaint_latents_from_depth(
     #    先把 mask 从 (B, F, H, W) -> (B, 1, F, H, W)
     mask_reshape = rearrange(mask, "b f h w -> b 1 f h w")  # torch.Size([1, 1, 49, 512, 512])
     mask_reshape = 1 - mask_reshape
-    mask_reshape = resize_mask(mask_reshape, latents, vae.cache_mag_vae)  # torch.Size([1, 1, 13, 64, 64])
+    mask_reshape = resize_mask(mask_reshape, latents_shape, vae_cache_mag_vae)  # torch.Size([1, 1, 13, 64, 64])
 
     # 5. 可选：对原视频添加噪声
     mask_pixel_values_with_noise = add_noise_to_reference_video(mask_warped)  # torch.Size([1, 49, 3, 512, 512])
@@ -1171,18 +1146,6 @@ def main():
     if args.train_mode != "normal" and config['transformer_additional_kwargs'].get('enable_clip_in_inpaint', True):
         image_encoder.requires_grad_(False)
 
-    # Lora will work with this...
-    network = create_network(
-        1.0,
-        args.rank,
-        args.network_alpha,
-        text_encoder,
-        transformer3d,
-        neuron_dropout=None,
-        add_lora_in_attn_temporal=True,
-    )
-    network.apply_to(text_encoder, transformer3d, args.train_text_encoder and not args.training_with_video_token_length, True)
-
     # Load transformer and vae from path if it needs.
     if args.transformer_path is not None:
         print(f"From checkpoint: {args.transformer_path}")
@@ -1210,6 +1173,23 @@ def main():
         m, u = vae.load_state_dict(state_dict, strict=False)
         print(f"missing keys: {len(m)}, unexpected keys: {len(u)}")
 
+    # A good trainable modules is showed below now.
+    transformer3d.train()
+    if accelerator.is_main_process:
+        accelerator.print(f"Trainable modules '{args.trainable_modules}'.")
+    for name, param in transformer3d.named_parameters():
+        for trainable_module_name in args.trainable_modules + args.trainable_modules_low_learning_rate:
+            if trainable_module_name in name:
+                param.requires_grad = True
+                break
+
+    # Create EMA for the transformer3d.
+    if args.use_ema:
+        ema_transformer3d = Choosen_Transformer3DModel.from_pretrained_2d(
+            args.pretrained_model_name_or_path, subfolder="transformer", transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs'])
+        )
+        ema_transformer3d = EMAModel(ema_transformer3d.parameters(), model_cls=Choosen_Transformer3DModel, model_config=ema_transformer3d.config)
+
     if args.enable_xformers_memory_efficient_attention and config['transformer_additional_kwargs'].get('transformer_type', 'Transformer3DModel') == 'Transformer3DModel':
         if is_xformers_available():
             import xformers
@@ -1228,13 +1208,43 @@ def main():
         # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
         def save_model_hook(models, weights, output_dir):
             if accelerator.is_main_process:
-                safetensor_save_path = os.path.join(output_dir, f"lora_diffusion_pytorch_model.safetensors")
-                save_model(safetensor_save_path, accelerator.unwrap_model(models[-1]))
+                if args.use_ema:
+                    ema_transformer3d.save_pretrained(os.path.join(output_dir, "transformer_ema"), max_shard_size="30GB")
+
+                models[0].save_pretrained(os.path.join(output_dir, "transformer"), max_shard_size="30GB")
+                if not args.use_deepspeed:
+                    weights.pop()
 
                 with open(os.path.join(output_dir, "sampler_pos_start.pkl"), 'wb') as file:
                     pickle.dump([batch_sampler.sampler._pos_start, first_epoch], file)
 
         def load_model_hook(models, input_dir):
+            if args.use_ema:
+                ema_path = os.path.join(input_dir, "transformer_ema")
+                _, ema_kwargs = Choosen_Transformer3DModel.load_config(ema_path, return_unused_kwargs=True)
+                load_model = Choosen_Transformer3DModel.from_pretrained_2d(
+                    input_dir, subfolder="transformer_ema", transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs'])
+                )
+                load_model = EMAModel(load_model.parameters(), model_cls=Choosen_Transformer3DModel, model_config=load_model.config)
+                load_model.load_state_dict(ema_kwargs)
+
+                ema_transformer3d.load_state_dict(load_model.state_dict())
+                ema_transformer3d.to(accelerator.device)
+                del load_model
+
+            for i in range(len(models)):
+                # pop models so that they are not loaded again
+                model = models.pop()
+
+                # load diffusers style into model
+                load_model = Choosen_Transformer3DModel.from_pretrained_2d(
+                    input_dir, subfolder="transformer", transformer_additional_kwargs=OmegaConf.to_container(config['transformer_additional_kwargs'])
+                )
+                model.register_to_config(**load_model.config)
+
+                model.load_state_dict(load_model.state_dict())
+                del load_model
+
             pkl_path = os.path.join(input_dir, "sampler_pos_start.pkl")
             if os.path.exists(pkl_path):
                 with open(pkl_path, 'rb') as file:
@@ -1274,9 +1284,34 @@ def main():
     else:
         optimizer_cls = torch.optim.AdamW
 
-    logging.info("Add network parameters")
-    trainable_params = list(filter(lambda p: p.requires_grad, network.parameters()))
-    trainable_params_optim = network.prepare_optimizer_params(args.learning_rate / 2, args.learning_rate, args.learning_rate)
+    # Select trainable params
+    trainable_params = list(filter(lambda p: p.requires_grad, transformer3d.parameters()))
+    trainable_params_optim = [
+        {'params': [], 'lr': args.learning_rate},
+        {'params': [], 'lr': args.learning_rate / 2},
+    ]
+    in_already = []
+    for name, param in transformer3d.named_parameters():
+        high_lr_flag = False
+        if name in in_already:
+            continue
+        for trainable_module_name in args.trainable_modules:
+            if trainable_module_name in name:
+                in_already.append(name)
+                high_lr_flag = True
+                trainable_params_optim[0]['params'].append(param)
+                if accelerator.is_main_process:
+                    print(f"Set {name} to lr : {args.learning_rate}")
+                break
+        if high_lr_flag:
+            continue
+        for trainable_module_name in args.trainable_modules_low_learning_rate:
+            if trainable_module_name in name:
+                in_already.append(name)
+                trainable_params_optim[1]['params'].append(param)
+                if accelerator.is_main_process:
+                    print(f"Set {name} to lr : {args.learning_rate / 2}")
+                break
 
     # Init optimizer
     if args.use_came:
@@ -1334,13 +1369,15 @@ def main():
     )
 
     # Prepare everything with our `accelerator`.
-    network, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(network, optimizer, train_dataloader, lr_scheduler)
+    transformer3d, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(transformer3d, optimizer, train_dataloader, lr_scheduler)
+
+    if args.use_ema:
+        ema_transformer3d.to(accelerator.device)
 
     # Move text_encode and vae to gpu and cast to weight_dtype
     vae.to(accelerator.device, dtype=weight_dtype)
     if args.train_mode != "normal" and config['transformer_additional_kwargs'].get('enable_clip_in_inpaint', True):
         image_encoder.to(accelerator.device, dtype=weight_dtype)
-    transformer3d.to(accelerator.device, dtype=weight_dtype)
     if not args.enable_text_encoder_in_dataloader:
         text_encoder.to(accelerator.device)
         if config['text_encoder_kwargs'].get('enable_multi_text_encoder', False):
@@ -1358,6 +1395,8 @@ def main():
     if accelerator.is_main_process:
         tracker_config = dict(vars(args))
         tracker_config.pop("validation_prompts")
+        tracker_config.pop("trainable_modules")
+        tracker_config.pop("trainable_modules_low_learning_rate")
         accelerator.init_trackers(args.tracker_project_name, tracker_config)
 
     # Function for unwrapping if model was compiled with `torch.compile`.
@@ -1381,47 +1420,67 @@ def main():
 
     # Potentially load in the weights and states from a previous save
     if args.resume_from_checkpoint:
-        if args.resume_from_checkpoint != "latest":
-            path = os.path.basename(args.resume_from_checkpoint)
-        else:
-            # Get the most recent checkpoint
-            dirs = os.listdir(args.output_dir)
-            dirs = [d for d in dirs if d.startswith("checkpoint")]
-            dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
-            path = dirs[-1] if len(dirs) > 0 else None
-
-        if path is None:
-            accelerator.print(f"Checkpoint '{args.resume_from_checkpoint}' does not exist. Starting a new training run.")
-            args.resume_from_checkpoint = None
-            initial_global_step = 0
-        else:
-            global_step = int(path.split("-")[1])
-            initial_global_step = global_step
-
-            pkl_path = os.path.join(os.path.join(args.output_dir, path), "sampler_pos_start.pkl")
-            if os.path.exists(pkl_path):
-                with open(pkl_path, 'rb') as file:
-                    _, first_epoch = pickle.load(file)
+        try:
+            if args.resume_from_checkpoint != "latest":
+                path = os.path.basename(args.resume_from_checkpoint)
             else:
-                first_epoch = global_step // num_update_steps_per_epoch
-            print(f"Load pkl from {pkl_path}. Get first_epoch = {first_epoch}.")
+                # Get the most recent checkpoint
+                dirs = os.listdir(args.output_dir)
+                dirs = [d for d in dirs if d.startswith("checkpoint")]
+                dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
+                path = dirs[-1] if len(dirs) > 0 else None
 
-            from safetensors.torch import load_file, safe_open
+            if path is None:
+                accelerator.print(f"Checkpoint '{args.resume_from_checkpoint}' does not exist. Starting a new training run.")
+                args.resume_from_checkpoint = None
+                initial_global_step = 0
+            else:
+                global_step = int(path.split("-")[1])
 
-            state_dict = load_file(os.path.join(os.path.join(args.output_dir, path), "lora_diffusion_pytorch_model.safetensors"))
-            m, u = accelerator.unwrap_model(network).load_state_dict(state_dict, strict=False)
-            print(f"missing keys: {len(m)}, unexpected keys: {len(u)}")
+                initial_global_step = global_step
 
-            accelerator.print(f"Resuming from checkpoint {path}")
-            accelerator.load_state(os.path.join(args.output_dir, path))
+                pkl_path = os.path.join(os.path.join(args.output_dir, path), "sampler_pos_start.pkl")
+                if os.path.exists(pkl_path):
+                    with open(pkl_path, 'rb') as file:
+                        _, first_epoch = pickle.load(file)
+                else:
+                    first_epoch = global_step // num_update_steps_per_epoch
+                print(f"Load pkl from {pkl_path}. Get first_epoch = {first_epoch}.")
+
+                accelerator.print(f"Resuming from checkpoint {path}")
+                accelerator.load_state(os.path.join(args.output_dir, path))
+        except:
+            if args.resume_from_checkpoint != "latest":
+                path = os.path.basename(args.resume_from_checkpoint)
+            else:
+                # Get the most recent checkpoint
+                dirs = os.listdir(args.output_dir)
+                dirs = [d for d in dirs if d.startswith("checkpoint")]
+                dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
+                path = dirs[-2] if len(dirs) > 0 else None
+
+            if path is None:
+                accelerator.print(f"Checkpoint '{args.resume_from_checkpoint}' does not exist. Starting a new training run.")
+                args.resume_from_checkpoint = None
+                initial_global_step = 0
+            else:
+                global_step = int(path.split("-")[1])
+
+                initial_global_step = global_step
+
+                pkl_path = os.path.join(os.path.join(args.output_dir, path), "sampler_pos_start.pkl")
+                if os.path.exists(pkl_path):
+                    with open(pkl_path, 'rb') as file:
+                        _, first_epoch = pickle.load(file)
+                else:
+                    first_epoch = global_step // num_update_steps_per_epoch
+                print(f"Load pkl from {pkl_path}. Get first_epoch = {first_epoch}.")
+
+                accelerator.print(f"Resuming from checkpoint {path}")
+                accelerator.load_state(os.path.join(args.output_dir, path))
     else:
-        initial_global_step = 0
-
-    # function for saving/removing
-    def save_model(ckpt_file, unwrapped_nw):
-        os.makedirs(args.output_dir, exist_ok=True)
-        accelerator.print(f"\nsaving checkpoint: {ckpt_file}")
-        unwrapped_nw.save_weights(ckpt_file, weight_dtype, None)
+        global_step = 0
+        initial_global_step = global_step
 
     progress_bar = tqdm(
         range(0, args.max_train_steps),
@@ -1509,8 +1568,8 @@ def main():
                     pixel_values,  # (B, F, 3, 512, 512)
                     weight_dtype,
                     accelerator.device,
-                    latents,  # (B, 16, 13, 64, 64)
-                    vae,
+                    latents.shape,  # (B, 16, 13, 64, 64)
+                    vae.cache_mag_vae,
                 )
 
                 # Reduce the vram by offload vae and text encoders
@@ -1758,6 +1817,7 @@ def main():
                     )[0]
                     if epoch == first_epoch and step % 100 == 0 and accelerator.is_main_process:
                         save_videos_set(first_frames, depths, mask, mask_warped, mask_pixel_values, pixel_values, os.path.join(args.output_dir, f"sanity_check-{global_step}"))
+
                     if noise_pred.size()[1] != vae.config.latent_channels:
                         noise_pred, _ = noise_pred.chunk(2, dim=1)
 
@@ -1846,6 +1906,9 @@ def main():
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
+
+                if args.use_ema:
+                    ema_transformer3d.step(transformer3d.parameters())
                 progress_bar.update(1)
                 global_step += 1
                 accelerator.log({"train_loss": train_loss}, step=global_step)
@@ -1869,18 +1932,18 @@ def main():
 
                                 for removing_checkpoint in removing_checkpoints:
                                     removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
-                                    shutil.rmtree(removing_checkpoint)
-                        if not args.save_state:
-                            safetensor_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}.safetensors")
-                            save_model(safetensor_save_path, accelerator.unwrap_model(network))
-                            logger.info(f"Saved safetensor to {safetensor_save_path}")
-                        else:
-                            accelerator_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-                            accelerator.save_state(accelerator_save_path)
-                            logger.info(f"Saved state to {accelerator_save_path}")
+                                    shutil.rmtree(removing_checkpoint, ignore_errors=True)
+
+                        save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                        accelerator.save_state(save_path)
+                        logger.info(f"Saved state to {save_path}")
 
                 if accelerator.is_main_process:
                     if args.validation_prompts is not None and global_step % args.validation_steps == 0:
+                        if args.use_ema:
+                            # Store the UNet parameters temporarily and load the EMA parameters to perform inference.
+                            ema_transformer3d.store(transformer3d.parameters())
+                            ema_transformer3d.copy_to(transformer3d.parameters())
                         log_validation(
                             vae,
                             text_encoder,
@@ -1890,13 +1953,15 @@ def main():
                             transformer3d,
                             image_encoder,
                             image_processor,
-                            network,
                             config,
                             args,
                             accelerator,
                             weight_dtype,
                             global_step,
                         )
+                        if args.use_ema:
+                            # Switch back to the original transformer3d parameters.
+                            ema_transformer3d.restore(transformer3d.parameters())
 
             logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
@@ -1906,6 +1971,10 @@ def main():
 
         if accelerator.is_main_process:
             if args.validation_prompts is not None and epoch % args.validation_epochs == 0:
+                if args.use_ema:
+                    # Store the UNet parameters temporarily and load the EMA parameters to perform inference.
+                    ema_transformer3d.store(transformer3d.parameters())
+                    ema_transformer3d.copy_to(transformer3d.parameters())
                 log_validation(
                     vae,
                     text_encoder,
@@ -1915,23 +1984,27 @@ def main():
                     transformer3d,
                     image_encoder,
                     image_processor,
-                    network,
                     config,
                     args,
                     accelerator,
                     weight_dtype,
                     global_step,
                 )
+                if args.use_ema:
+                    # Switch back to the original transformer3d parameters.
+                    ema_transformer3d.restore(transformer3d.parameters())
 
     # Create the pipeline using the trained modules and save it.
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        safetensor_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}.safetensors")
-        accelerator_save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-        save_model(safetensor_save_path, accelerator.unwrap_model(network))
-        if args.save_state:
-            accelerator.save_state(accelerator_save_path)
-        logger.info(f"Saved state to {accelerator_save_path}")
+        transformer3d = unwrap_model(transformer3d)
+        if args.use_ema:
+            ema_transformer3d.copy_to(transformer3d.parameters())
+
+        if args.use_deepspeed or accelerator.is_main_process:
+            save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+            accelerator.save_state(save_path)
+            logger.info(f"Saved state to {save_path}")
 
     accelerator.end_training()
 
