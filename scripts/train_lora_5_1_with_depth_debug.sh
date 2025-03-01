@@ -3,7 +3,7 @@ export DATASET_NAME="/mnt/chenyang_lei/Datasets/easyanimate_dataset"
 export DATASET_META_NAME="/mnt/chenyang_lei/Datasets/easyanimate_dataset/realestate_dataset/metadata.json"
 export NCCL_IB_DISABLE=1
 export NCCL_P2P_DISABLE=1
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=0
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 NCCL_DEBUG=INFO
 
@@ -23,16 +23,16 @@ accelerate launch \
   --token_sample_size=512 \
   --video_sample_stride=4 \
   --video_sample_n_frames=49 \
-  --train_batch_size=2 \
+  --train_batch_size=1 \
   --video_repeat=1 \
   --gradient_accumulation_steps=1 \
-  --dataloader_num_workers=8 \
+  --dataloader_num_workers=1 \
   --num_train_epochs=3 \
   --checkpointing_steps=4019 \
   --learning_rate=1e-04 \
   --seed=42 \
   --low_vram \
-  --output_dir="output_dir_20250301_inpainting_with_depth_lora" \
+  --output_dir="output_dir_20250301_inpainting_with_depth_lora_debug" \
   --gradient_checkpointing \
   --mixed_precision="bf16" \
   --adam_weight_decay=5e-3 \

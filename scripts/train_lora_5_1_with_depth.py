@@ -15,6 +15,13 @@
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
+# import debugpy
+
+# # 允许其他机器连接
+# debugpy.listen(("0.0.0.0", 5678))
+# print("等待调试器连接...")
+# debugpy.wait_for_client()  # 阻塞，直到调试器连接
+# print("调试器已连接")
 
 import argparse
 import copy
@@ -944,8 +951,8 @@ def get_inpaint_latents_from_depth(
     pixel_values: torch.Tensor,  # (B, F, 3, 512, 512)
     weight_dtype,
     accelerator_device,
-    latents: torch.Tensor,  # (B, 16, 13, 64, 64)
-    vae,
+    latents_shape: list,  # (B, 16, 13, 64, 64)
+    vae_cache_mag_vae,
 ):
     mask, warped = get_mask_batch(first_frames, depths, camera_poses, ori_hs, ori_ws, video_sample_size)  # => torch.Size([1, 49, 512, 512]), torch.Size([1, 49, 3, 512, 512])
     mask_for_pixel = mask.unsqueeze(2)  # torch.Size([1, 49, 1, 512, 512])
@@ -972,7 +979,7 @@ def get_inpaint_latents_from_depth(
     #    先把 mask 从 (B, F, H, W) -> (B, 1, F, H, W)
     mask_reshape = rearrange(mask, "b f h w -> b 1 f h w")  # torch.Size([1, 1, 49, 512, 512])
     mask_reshape = 1 - mask_reshape
-    mask_reshape = resize_mask(mask_reshape, latents, vae.cache_mag_vae)  # torch.Size([1, 1, 13, 64, 64])
+    mask_reshape = resize_mask(mask_reshape, latents_shape, vae_cache_mag_vae)  # torch.Size([1, 1, 13, 64, 64])
 
     # 5. 可选：对原视频添加噪声
     mask_pixel_values_with_noise = add_noise_to_reference_video(mask_warped)  # torch.Size([1, 49, 3, 512, 512])
@@ -1493,11 +1500,17 @@ def main():
                         if text_encoder_2 is not None:
                             text_encoder_2.to('cpu')
 
-                first_frames_processed, (h, w) = pre_process_first_frames(first_frames, accelerator.device, weight_dtype)  # 2,3,518,518
-                first_frames_processed = rearrange(first_frames_processed, "b f c h w -> (b f) c h w")
-                depths = depth_anything.forward(first_frames_processed)  # torch.Size([2, 518, 518])
-                depths = F.interpolate(depths.unsqueeze(1), (h, w), mode="bilinear", align_corners=True).squeeze(1)  # torch.Size([2, 512, 512])
-                depths = rearrange(depths, "(b f) h w -> b f h w", f=video_length)  # torch.Size([1, 49, 512, 512])
+                first_frames_processed, (h, w) = pre_process_first_frames(first_frames, accelerator.device, first_frames.dtype)  # torch.Size([1, 49, 3, 518, 518])
+                depths_list = []
+                for video_frames in first_frames_processed:  # torch.Size([49, 3, 518, 518])
+                    # first_frames_processed = rearrange(first_frames_processed, "b f c h w -> (b f) c h w")
+                    depths = depth_anything.forward(video_frames)  # torch.Size([f, 518, 518])
+                    depths = F.interpolate(depths.unsqueeze(1), (h, w), mode="bilinear", align_corners=True).squeeze(1)  # torch.Size([f, 512, 512])
+                    # depths = rearrange(depths, "(b f) h w -> b f h w", f=video_length)  # torch.Size([b, 49, 512, 512])
+                    depths_list.append(depths)
+                depths = torch.stack(depths_list, dim=0)  # torch.Size([b, 49, 512, 512])
+
+                latents_shape = (depths.shape[0], 16, 13, 64, 64)
 
                 t2v_flag, mask_pixel_values_with_noise, mask, mask_reshape, mask_pixel_values, mask_warped = get_inpaint_latents_from_depth(
                     depths,
@@ -1509,8 +1522,8 @@ def main():
                     pixel_values,  # (B, F, 3, 512, 512)
                     weight_dtype,
                     accelerator.device,
-                    latents,  # (B, 16, 13, 64, 64)
-                    vae,
+                    latents_shape,  # (B, 16, 13, 64, 64)
+                    vae.cache_mag_vae,
                 )
 
                 # Reduce the vram by offload vae and text encoders

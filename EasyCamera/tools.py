@@ -111,7 +111,7 @@ def colorize(value, vmin=None, vmax=None, cmap='magma_r', invalid_val=-99, inval
         raise ValueError("输入数组应为二维 (H, W) 或三维 (F, H, W)！")
 
 
-def _depth_to_gray(depth_tensor: np.ndarray, depth_min=0, depth_max=80, cmap='magma_r') -> np.ndarray:
+def _depth_to_gray(depth_tensor: np.ndarray, depth_min=0, depth_max=20, cmap='magma_r') -> np.ndarray:
     """
     将深度图映射为彩色图。
 

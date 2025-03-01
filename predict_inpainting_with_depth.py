@@ -433,7 +433,7 @@ if __name__ == '__main__':
     lora_weight = 0.55
 
     # Load pretrained model if need
-    checkpoint_path = "output_dir_20250219_inpainting_with_depth_transformer/checkpoint-8038"
+    checkpoint_path = "output_dir_20250226_inpainting_with_depth_attn1_indoor/checkpoint-8038"
     # checkpoint_path = None
 
     # Other params
@@ -448,7 +448,7 @@ if __name__ == '__main__':
 
     negative_prompt = "Twisted body, limb deformities, text captions, comic, static, ugly, error, messy code, Blurring, mutation, deformation, distortion, dark and solid, comics, text subtitles, line art, quiet, solid."
 
-    save_path = "output_dir_20250219_inpainting_with_depth_transformer/results_checkpoint-8038"
+    save_path = "output_dir_20250226_inpainting_with_depth_attn1_indoor/results_checkpoint-8038"
 
     main(
         GPU_memory_mode,
