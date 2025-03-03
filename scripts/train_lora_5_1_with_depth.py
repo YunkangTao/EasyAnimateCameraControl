@@ -18,7 +18,7 @@
 # import debugpy
 
 # # 允许其他机器连接
-# debugpy.listen(("0.0.0.0", 5678))
+# debugpy.listen(("0.0.0.0", 5679))
 # print("等待调试器连接...")
 # debugpy.wait_for_client()  # 阻塞，直到调试器连接
 # print("调试器已连接")
@@ -863,7 +863,7 @@ def pre_process_first_frames(first_frames, device, dtype, input_size=518):
 
 
 def resize_mask(
-    mask: torch.Tensor, latents: torch.Tensor, process_first_frame_only: bool = True, mode: str = "trilinear", align_corners: bool = False  # (B, C, F, H, W)  # (B, C', F', H', W')
+    mask: torch.Tensor, latents_shape, process_first_frame_only: bool = True, mode: str = "trilinear", align_corners: bool = False  # (B, C, F, H, W)  # (B, C', F', H', W')
 ):
     """
     尝试复刻您原先的逻辑:
@@ -874,7 +874,7 @@ def resize_mask(
     注意: 这里假设 mask.shape = (B, C, F, H, W)；latents.shape = (B, C', F', H', W')。
     """
     b, c, f, h, w = mask.shape
-    _, _, f2, h2, w2 = latents.shape
+    _, _, f2, h2, w2 = latents_shape
 
     if process_first_frame_only:
         # 目标尺寸先复制一下
@@ -1346,6 +1346,8 @@ def main():
 
     # Move text_encode and vae to gpu and cast to weight_dtype
     vae.to(accelerator.device, dtype=weight_dtype)
+    depth_anything.to(accelerator.device, dtype=weight_dtype)
+    transformer3d.to(accelerator.device, dtype=weight_dtype)
     if args.train_mode != "normal" and config['transformer_additional_kwargs'].get('enable_clip_in_inpaint', True):
         image_encoder.to(accelerator.device, dtype=weight_dtype)
     if not args.enable_text_encoder_in_dataloader:
@@ -1500,7 +1502,7 @@ def main():
                         if text_encoder_2 is not None:
                             text_encoder_2.to('cpu')
 
-                first_frames_processed, (h, w) = pre_process_first_frames(first_frames, accelerator.device, first_frames.dtype)  # torch.Size([1, 49, 3, 518, 518])
+                first_frames_processed, (h, w) = pre_process_first_frames(first_frames, accelerator.device, weight_dtype)  # torch.Size([1, 49, 3, 518, 518])
                 depths_list = []
                 for video_frames in first_frames_processed:  # torch.Size([49, 3, 518, 518])
                     # first_frames_processed = rearrange(first_frames_processed, "b f c h w -> (b f) c h w")
@@ -1764,7 +1766,7 @@ def main():
                         image_meta_size=add_time_ids,
                         style=style,
                         image_rotary_emb=image_rotary_emb,
-                        inpaint_latents=inpaint_latents if args.train_mode != "normal" else None,
+                        inpaint_latents=inpaint_latents.to(noisy_latents.device, noisy_latents.dtype) if args.train_mode != "normal" else None,
                         clip_encoder_hidden_states=clip_encoder_hidden_states if args.train_mode != "normal" else None,
                         clip_attention_mask=clip_attention_mask if args.train_mode != "normal" else None,
                         return_dict=False,

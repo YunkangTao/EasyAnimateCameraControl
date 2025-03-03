@@ -13,7 +13,7 @@ accelerate launch \
   --deepspeed_config_file config/zero_stage2_config.json \
   --deepspeed_multinode_launcher standard \
   --main_process_port 29501 \
-  scripts/train_inpainting_5.1_with_depth.py \
+  scripts/train_inpainting_5_1_with_depth.py \
   --pretrained_model_name_or_path=$MODEL_NAME \
   --train_data_dir=$DATASET_NAME \
   --train_data_meta=$DATASET_META_NAME \
@@ -33,8 +33,8 @@ accelerate launch \
   --lr_scheduler="constant_with_warmup" \
   --lr_warmup_steps=100 \
   --seed=42 \
-  --low_vram \
-  --output_dir="output_dir_20250227_inpainting_with_depth_transformer" \
+  --output_dir="output_dir_20250301_inpainting_with_depth_indoor_51" \
+  --enable_xformers_memory_efficient_attention \
   --gradient_checkpointing \
   --mixed_precision="bf16" \
   --adam_weight_decay=5e-2 \

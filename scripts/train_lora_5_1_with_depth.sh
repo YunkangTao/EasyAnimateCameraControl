@@ -31,8 +31,8 @@ accelerate launch \
   --checkpointing_steps=4019 \
   --learning_rate=1e-04 \
   --seed=42 \
-  --low_vram \
   --output_dir="output_dir_20250301_inpainting_with_depth_lora" \
+  --enable_xformers_memory_efficient_attention \
   --gradient_checkpointing \
   --mixed_precision="bf16" \
   --adam_weight_decay=5e-3 \

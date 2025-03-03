@@ -1376,6 +1376,7 @@ def main():
 
     # Move text_encode and vae to gpu and cast to weight_dtype
     vae.to(accelerator.device, dtype=weight_dtype)
+    depth_anything.to(accelerator.device, dtype=weight_dtype)
     if args.train_mode != "normal" and config['transformer_additional_kwargs'].get('enable_clip_in_inpaint', True):
         image_encoder.to(accelerator.device, dtype=weight_dtype)
     if not args.enable_text_encoder_in_dataloader:
@@ -1553,10 +1554,16 @@ def main():
                             text_encoder_2.to('cpu')
 
                 first_frames_processed, (h, w) = pre_process_first_frames(first_frames, accelerator.device, weight_dtype)  # 2,3,518,518
-                first_frames_processed = rearrange(first_frames_processed, "b f c h w -> (b f) c h w")
-                depths = depth_anything.forward(first_frames_processed)  # torch.Size([2, 518, 518])
-                depths = F.interpolate(depths.unsqueeze(1), (h, w), mode="bilinear", align_corners=True).squeeze(1)  # torch.Size([2, 512, 512])
-                depths = rearrange(depths, "(b f) h w -> b f h w", f=video_length)  # torch.Size([1, 49, 512, 512])
+                depths_list = []
+                for video_frames in first_frames_processed:
+                    # first_frames_processed = rearrange(first_frames_processed, "b f c h w -> (b f) c h w")
+                    depths = depth_anything.forward(video_frames)  # torch.Size([f, 518, 518])
+                    depths = F.interpolate(depths.unsqueeze(1), (h, w), mode="bilinear", align_corners=True).squeeze(1)  # torch.Size([f, 512, 512])
+                    # depths = rearrange(depths, "(b f) h w -> b f h w", f=video_length)  # torch.Size([b, 49, 512, 512])
+                    depths_list.append(depths)
+                depths = torch.stack(depths_list, dim=0)  # torch.Size([b, 49, 512, 512])
+
+                latents_shape = (depths.shape[0], 16, 13, 64, 64)
 
                 t2v_flag, mask_pixel_values_with_noise, mask, mask_reshape, mask_pixel_values, mask_warped = get_inpaint_latents_from_depth(
                     depths,
@@ -1568,7 +1575,7 @@ def main():
                     pixel_values,  # (B, F, 3, 512, 512)
                     weight_dtype,
                     accelerator.device,
-                    latents.shape,  # (B, 16, 13, 64, 64)
+                    latents_shape,  # (B, 16, 13, 64, 64)
                     vae.cache_mag_vae,
                 )
 
@@ -1810,7 +1817,7 @@ def main():
                         image_meta_size=add_time_ids,
                         style=style,
                         image_rotary_emb=image_rotary_emb,
-                        inpaint_latents=inpaint_latents if args.train_mode != "normal" else None,
+                        inpaint_latents=inpaint_latents.to(noisy_latents.device, noisy_latents.dtype) if args.train_mode != "normal" else None,
                         clip_encoder_hidden_states=clip_encoder_hidden_states if args.train_mode != "normal" else None,
                         clip_attention_mask=clip_attention_mask if args.train_mode != "normal" else None,
                         return_dict=False,
