@@ -381,7 +381,7 @@ if __name__ == '__main__':
     # Only V1 does need a motion module
     motion_module_path = None
     vae_path = None
-    lora_path = None
+    lora_path = "output_dir_20250301_inpainting_with_depth_lora/checkpoint-4019.safetensors"
 
     # Other params
     sample_size = [512, 512]
@@ -410,7 +410,7 @@ if __name__ == '__main__':
 
     negative_prompt = "Twisted body, limb deformities, text captions, comic, static, ugly, error, messy code, Blurring, mutation, deformation, distortion, dark and solid, comics, text subtitles, line art, quiet, solid."
 
-    save_path = "output_dir_20250219_inpainting_with_depth_transformer/results_checkpoint-8038"
+    save_path = "output_dir_20250219_inpainting_with_depth_transformer/results_lora_checkpoint-4019"
 
     main(
         GPU_memory_mode,
