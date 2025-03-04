@@ -957,8 +957,17 @@ def get_inpaint_latents_from_depth(
     mask, warped = get_mask_batch(first_frames, depths, camera_poses, ori_hs, ori_ws, video_sample_size)  # => torch.Size([1, 49, 512, 512]), torch.Size([1, 49, 3, 512, 512])
     mask_for_pixel = mask.unsqueeze(2)  # torch.Size([1, 49, 1, 512, 512])
     mask_pixel_values = pixel_values * (mask_for_pixel < 0.5) + torch.ones_like(pixel_values) * (mask_for_pixel > 0.5) * -1  # torch.Size([1, 49, 3, 512, 512])
+
+    video_transforms = transforms.Compose(
+        [
+            transforms.Resize(video_sample_size),
+            transforms.CenterCrop((video_sample_size, video_sample_size)),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=False),
+        ]
+    )
+
     warped = warped / 255.0
-    warped = warped * 2.0 - 1.0
+    warped = video_transforms(warped)  # torch.Size([1, 49, 3, 512, 512])
 
     # mask_warped = warped * (1 - mask_for_pixel) + (-1) * mask_for_pixel
     mask_warped = warped * (mask_for_pixel < 0.5) + torch.ones_like(warped) * (mask_for_pixel > 0.5) * -1

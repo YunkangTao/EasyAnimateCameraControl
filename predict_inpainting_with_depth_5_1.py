@@ -151,6 +151,7 @@ def main(
 
     # Get DepthAnythingV2
     depth_anything = prepare_depth_anything(config['depth_anything_kwargs']['dav2_model'], config['depth_anything_kwargs']['dav2_outdoor'])
+    depth_anything.to("cuda", dtype=weight_dtype)
 
     # Get Vae
     Choosen_AutoencoderKL = name_to_autoencoder_magvit[config['vae_kwargs'].get('vae_type', 'AutoencoderKL')]
@@ -268,13 +269,13 @@ def main(
     for index in range(len(train_dataset)):
         sample = train_dataset[index]
 
-        pixel_values = sample["pixel_values"].unsqueeze(0).to("cuda")
+        pixel_values = sample["pixel_values"].unsqueeze(0).to("cuda")  # (B, F, 3, 512, 512)
         camera_poses = sample["camera_poses"].unsqueeze(0).to("cuda")
         text = sample["text"]
         type = sample["type"]
         idx = sample["idx"]
-        ori_hs = sample["ori_h"]
-        ori_ws = sample["ori_w"]
+        ori_hs = torch.tensor(sample["ori_h"])
+        ori_ws = torch.tensor(sample["ori_w"])
         video_id = sample["video_id"]
         title = sample["title"]
         first_frames = sample["clip_pixel_values"].unsqueeze(0).to("cuda")
@@ -296,7 +297,7 @@ def main(
 
         latents_shape = (1, 16, 13, 64, 64)
 
-        _, _, mask, _, _, mask_warped = get_inpaint_latents_from_depth(
+        t2v_flag, mask_pixel_values_with_noise, mask, mask_reshape, mask_pixel_values, mask_warped = get_inpaint_latents_from_depth(
             depths,
             first_frames,
             camera_poses,
@@ -309,9 +310,11 @@ def main(
             latents_shape,  # (B, 16, 13, 64, 64)
             vae.cache_mag_vae,
         )
-
-        input_video = pixel_values * 2 + 1
+        # pixel_values = rearrange(pixel_values, "b f c h w -> b c f h w")
+        mask_warped = rearrange(mask_warped, "b f c h w -> b c f h w")
+        # input_video = pixel_values * 0.5 + 0.5
         input_video_mask = mask * 255
+        input_video_mask = input_video_mask.unsqueeze(1)  # (B, 1, F, H, W)
         clip_image = None
 
         with torch.no_grad():
@@ -324,12 +327,15 @@ def main(
                 generator=generator,
                 guidance_scale=guidance_scale,
                 num_inference_steps=num_inference_steps,
-                video=input_video,
+                # video=input_video,
                 mask_video=input_video_mask,
+                masked_video_latents=mask_warped,
                 clip_image=clip_image,
                 strength=denoise_strength,
             ).frames
         sample = sample.permute([0, 2, 1, 3, 4])
+        # pixel_values = rearrange(pixel_values, "b c f h w -> b f c h w")
+        mask_warped = rearrange(mask_warped, "b c f h w -> b f c h w")
 
         video_path = os.path.join(save_path, video_id)
         dir_path = os.path.dirname(video_path)
@@ -410,7 +416,7 @@ if __name__ == '__main__':
 
     negative_prompt = "Twisted body, limb deformities, text captions, comic, static, ugly, error, messy code, Blurring, mutation, deformation, distortion, dark and solid, comics, text subtitles, line art, quiet, solid."
 
-    save_path = "output_dir_20250219_inpainting_with_depth_transformer/results_lora_checkpoint-4019"
+    save_path = "output_dir_20250301_inpainting_with_depth_lora/results_lora_checkpoint-4019"
 
     main(
         GPU_memory_mode,
