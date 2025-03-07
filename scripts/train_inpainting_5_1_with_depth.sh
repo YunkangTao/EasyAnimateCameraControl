@@ -33,7 +33,7 @@ accelerate launch \
   --lr_scheduler="constant_with_warmup" \
   --lr_warmup_steps=100 \
   --seed=42 \
-  --output_dir="output_dir_20250301_inpainting_with_depth_indoor_51" \
+  --output_dir="output_dir_20250304_inpainting_with_depth_indoor_51" \
   --enable_xformers_memory_efficient_attention \
   --gradient_checkpointing \
   --mixed_precision="bf16" \

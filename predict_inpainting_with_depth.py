@@ -340,7 +340,7 @@ def main(
     else:
         video_length = int(video_length // vae.mini_batch_encoder * vae.mini_batch_encoder) if video_length != 1 else 1
 
-    for index in range(len(train_dataset)):
+    for index in range(848, len(train_dataset)):
         sample = train_dataset[index]
 
         pixel_values = sample["pixel_values"].unsqueeze(0).to("cuda")
@@ -355,7 +355,7 @@ def main(
         clip_pixel_values = sample["clip_pixel_values"].unsqueeze(0).to("cuda")
 
         with torch.no_grad():
-            video, depths, mask, mask_warped = pipeline(
+            video, depths, mask, mask_warped, mask_latents1 = pipeline(
                 text,
                 video_length=video_length,
                 negative_prompt=negative_prompt,
@@ -374,6 +374,7 @@ def main(
                 return_dict=False,
             )
         video = video.permute([0, 2, 1, 3, 4])
+        mask_latents1 = mask_latents1.permute([0, 2, 1, 3, 4])
 
         video_path = os.path.join(save_path, video_id)
         dir_path = os.path.dirname(video_path)

@@ -1045,7 +1045,7 @@ class EasyCameraPipeline(DiffusionPipeline):
 
         # 7. Prepare inpaint latents if it needs.
 
-        inpaint_latents, _, mask, mask_warped = get_inpaint_latents_from_depth(
+        inpaint_latents, _, mask, mask_warped, mask_latents1 = get_inpaint_latents_from_depth(
             depths,  # torch.Size([b, f, 512, 512])
             clip_image,  # clip_image: b,f,c,h,w;-1,1
             camera_poses,
@@ -1287,15 +1287,17 @@ class EasyCameraPipeline(DiffusionPipeline):
 
         # Post-processing
         video = self.decode_latents(latents)
+        mask_latents1 = self.decode_latents(mask_latents1)
 
         # Convert to tensor
         if output_type == "latent":
             video = torch.from_numpy(video)
+            mask_latents1 = torch.from_numpy(mask_latents1)
 
         # Offload all models
         self.maybe_free_model_hooks()
 
         if not return_dict:
-            return video, depths, mask, mask_warped
+            return video, depths, mask, mask_warped, mask_latents1
 
         return EasyAnimatePipelineOutput(frames=video)

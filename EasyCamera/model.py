@@ -411,7 +411,7 @@ def get_inpaint_latents_from_depth(
     # 按照 VAE scaling_factor 进行缩放
     inpaint_latents = inpaint_latents * vae.config.scaling_factor
 
-    return inpaint_latents, mask_pixel_values, mask, mask_warped
+    return inpaint_latents, mask_pixel_values, mask, mask_warped, mask_latents1
 
 
 class EasyCamera(nn.Module):

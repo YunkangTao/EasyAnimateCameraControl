@@ -31,8 +31,7 @@ from easyanimate.utils.lora_utils import merge_lora, unmerge_lora
 from easyanimate.utils.utils import get_video_to_video_latent, save_videos_grid
 
 # from EasyCamera.warp_a_video import *
-from scripts.train_inpainting_5_1_with_depth import prepare_depth_anything, pre_process_first_frames, get_inpaint_latents_from_depth
-from EasyCamera.tools import save_videos_set
+from EasyCamera.tools import save_videos_set, get_warped_from_depth, pre_process_first_frames, prepare_depth_anything
 from safetensors.torch import load_file
 from easyanimate.data.dataset_inpainting_with_depth import VideoDatasetWithDepth
 import torch.nn.functional as F
@@ -261,6 +260,9 @@ def main(
 
     generator = torch.Generator(device="cuda").manual_seed(seed)
 
+    if lora_path is not None:
+        pipeline = merge_lora(pipeline, lora_path, lora_weight, device="cuda", dtype=weight_dtype)
+
     if vae.cache_mag_vae:
         video_length = int((video_length - 1) // vae.mini_batch_encoder * vae.mini_batch_encoder) + 1 if video_length != 1 else 1
     else:
@@ -297,7 +299,7 @@ def main(
 
         latents_shape = (1, 16, 13, 64, 64)
 
-        t2v_flag, mask_pixel_values_with_noise, mask, mask_reshape, mask_pixel_values, mask_warped = get_inpaint_latents_from_depth(
+        t2v_flag, mask_pixel_values_with_noise, mask, mask_reshape, mask_pixel_values, mask_warped = get_warped_from_depth(
             depths,
             first_frames,
             camera_poses,
@@ -318,7 +320,7 @@ def main(
         clip_image = None
 
         with torch.no_grad():
-            sample = pipeline(
+            sample, video_masked_video = pipeline(
                 prompt=text,
                 video_length=video_length,
                 negative_prompt=negative_prompt,
@@ -332,8 +334,10 @@ def main(
                 masked_video_latents=mask_warped,
                 clip_image=clip_image,
                 strength=denoise_strength,
-            ).frames
+                return_dict=False,
+            )
         sample = sample.permute([0, 2, 1, 3, 4])
+        video_masked_video = video_masked_video.permute([0, 2, 1, 3, 4])
         # pixel_values = rearrange(pixel_values, "b c f h w -> b f c h w")
         mask_warped = rearrange(mask_warped, "b c f h w -> b f c h w")
 
